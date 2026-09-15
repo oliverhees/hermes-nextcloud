@@ -1,0 +1,9 @@
+name: hermes-fokus
+manifest_version: 1
+version: 0.1.0
+description: >
+  Fokus - ADHS-konformer Aufgabenplaner fuer Hermes Desktop. Brain-Dump-
+  Erfassung, genau eine naechste Aufgabe statt einer Liste, und eine
+  Tagesuebersicht aus Nextcloud-Aufgaben und -Terminen.
+author: Oliver Hees
+homepage: https://github.com/oliverhees/hermes-fokus

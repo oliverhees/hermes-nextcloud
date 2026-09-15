@@ -1,0 +1,7 @@
+{
+  "name": "hermes-fokus",
+  "label": "Fokus",
+  "description": "ADHS-konformer Aufgabenplaner auf Nextcloud-CalDAV",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}
