@@ -11,6 +11,13 @@ Nextcloud (CalDAV) ist die alleinige Wahrheit für Titel, Termin und Status. Das
 Plugin legt daneben nur ADHS-Zusatzdaten ab: Fokus-Reihenfolge, Teilschritte,
 Snooze-Zeitpunkte, Fortschritt (XP, Level, Streak, Erfolge).
 
+**Verhaltenswechsel seit v1.2:** Das Backend hat jetzt **Schreibzugriff auf
+reguläre Nextcloud-Kalender** (nicht nur auf den eigenen Fokus-Aufgaben-
+Kalender) — Termine lassen sich im Kalender-Tab anlegen und per Drag-and-Drop
+verschieben. Jedes Verschieben zeigt danach 6 Sekunden lang einen
+„Rückgängig"-Hinweis; ohne den wird `/events/move` bewusst nicht ans Frontend
+angebunden.
+
 Erledigen wird belohnt, nie bestraft: es gibt XP, Konfetti und einen
 Fortschritts-Tab, aber keinen XP-Verlust, keinen Malus und kein „Streak
 verloren". Ein ausgelassener Tag setzt den Streak still zurück.
@@ -22,7 +29,7 @@ verloren". Ein ausgelassener Tag setzt den Streak still zurück.
 | `plugin.yaml` | Agent-Hälfte (Name, Version, Autor) |
 | `dashboard/manifest.json` | mountet `plugin_api.py` unter `/api/plugins/hermes-fokus/` |
 | `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher, XP-/Erfolgs-Logik |
-| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, vier Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender), Konfetti-Feier |
+| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, vier Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender mit Monat/Woche/Tag), Konfetti-Feier, Drag-and-Drop, Inline-Formulare |
 | `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-fokus/` (Linux/macOS) |
 | `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-fokus\`) |
 
@@ -45,26 +52,51 @@ Desktop-Hälfte wird über `desktop/plugin.js` geladen.
 | `POST /focus/breakdown` | Freitext-Teilschritte merken (v1: keine KI) |
 | `GET /day` | Aufgaben + Termine eines Tages, zeitsortiert — optional `?date=YYYY-MM-DD`, ohne den Parameter wie bisher heute |
 | `GET /month` | `?year=…&month=1–12`: pro Tag nur Zahlen (`tasksOpen`, `tasksCompleted`, `events`) fürs Monatsraster |
+| `GET /week` | `?start=YYYY-MM-DD` (Montag): sieben Tage mit vollen Aufgaben-/Termin-Listen fürs Stundenraster |
 | `GET /progress` | Level, XP, Streak und alle zehn Erfolge für den Fortschritts-Tab (braucht kein Nextcloud) |
+| `GET /calendars` | Kalendernamen außer dem Fokus-Aufgaben-Kalender, fürs Termin-Anlegen |
+| `POST /events` | legt einen echten Termin in einem regulären Kalender an (nicht im Fokus-Aufgaben-Kalender) |
+| `POST /events/move` | verschiebt einen bestehenden Termin — Drag-and-Drop, schreibt echte Nextcloud-Daten |
+| `POST /tasks/due` | setzt oder löscht (`due: null`) die Fälligkeit einer Aufgabe — Drag-and-Drop im eigenen Kalender |
+| `GET /unscheduled` | offene Aufgaben ohne Fälligkeit, älteste zuerst — Inhalt des Seitenpanels |
 | `POST /reminder/check` | vom Desktop gepollt, sagt ob erinnert werden soll |
 
 ## Kalender
 
-Der vierte Tab zeigt einen ganzen Monat als Raster (Montag zuerst). Jede
-Tageszelle trägt die Zahl und, falls dort etwas liegt, eine knappe Zeile wie
-„2 Aufgaben · 1 Termin"; ein kleiner Punkt in der Akzentfarbe steht für an
-diesem Tag erledigte Aufgaben. Leere Tage bleiben leer — keine Nullen, keine
-Balken. Ein Klick öffnet den Tag im Detail: Aufgaben und Termine in zwei
-getrennten Abschnitten, Aufgaben direkt mit „Erledigt"-Knopf inklusive
-derselben XP-Feier wie im Fokus-Tab.
+Der vierte Tab hat zwei Raster-Ansichten (Umschalter oben) plus die
+Tagesansicht:
+
+- **Monat** — ein ganzer Monat als Raster (Montag zuerst). Jede Tageszelle
+  trägt die Zahl und, falls dort etwas liegt, eine knappe Zeile wie „2
+  Aufgaben · 1 Termin"; ein kleiner Punkt in der Akzentfarbe steht für an
+  diesem Tag erledigte Aufgaben. Leere Tage bleiben leer — keine Nullen, keine
+  Balken. Daneben steht das Seitenpanel **„Ungeplante Aufgaben"** (Aufgaben
+  ohne Fälligkeit) — von dort auf einen Tag ziehen setzt die Fälligkeit.
+- **Woche** — Stundenraster 06:00–22:00 plus Ganztags-Zeile, sieben
+  Tagesspalten. Termine und terminierte Aufgaben stehen als Kacheln an ihrer
+  Uhrzeit und lassen sich sowohl auf einen anderen Tag als auch auf eine
+  andere Stunde ziehen. Eine „Jetzt"-Linie in der Akzentfarbe markiert die
+  laufende Woche (nie Rot).
+- **Tag** — Klick auf eine Zelle oder einen Wochentag-Kopf öffnet den Tag im
+  Detail: Aufgaben und Termine in zwei getrennten Abschnitten, Aufgaben direkt
+  mit „Erledigt"-Knopf inklusive derselben XP-Feier wie im Fokus-Tab. Der
+  „+ Neu"-Knopf öffnet ein Inline-Formular für eine neue Aufgabe (mit
+  Fälligkeit an diesem Tag) oder einen neuen Termin (mit Kalenderauswahl,
+  ganztägig oder mit Uhrzeit).
+
+Jedes Verschieben per Drag-and-Drop — Aufgabe wie Termin — zeigt danach einen
+„Rückgängig"-Hinweis für ~6 Sekunden. Kein Bestätigungsdialog vorher (das wäre
+bei einer Aufgabe reine Reibung), aber ein Fehlklick auf einen echten Termin
+ist nie spurlos.
 
 Der Überblick zeigt bewusst mehr als die Fokusansicht: auch Aufgaben, die
 gerade auf „Später" stehen, erscheinen im Raster und in der Tagesansicht.
 Snooze heißt „jetzt nicht vor die Nase", nicht „aus dem Kalender streichen".
 
-**Einschränkung:** Aufgaben **ohne Fälligkeitsdatum** tauchen im Kalender nicht
-auf — sie haben keinen Tag, an den sie gehören, und leben im Fokus-Eingang.
-Nur was in Nextcloud ein `DUE` trägt, landet im Raster.
+**Einschränkung:** Aufgaben **ohne Fälligkeitsdatum** tauchen im Monats-/
+Wochenraster nicht auf — sie haben keinen Tag, an den sie gehören, und leben
+im Fokus-Eingang bzw. im „Ungeplante Aufgaben"-Panel. Erst das Ziehen auf
+einen Tag gibt ihnen eine Fälligkeit.
 
 ## Installation
 
@@ -144,7 +176,9 @@ an.
 
 ## Datenablage
 
-- **Nextcloud**: Aufgaben (VTODO im Kalender `Fokus-Aufgaben`), Termine (nur gelesen)
+- **Nextcloud**: Aufgaben (VTODO im Kalender `Fokus-Aufgaben`, lesen+schreiben),
+  Termine in regulären Kalendern (lesen, plus anlegen/verschieben aus dem
+  Kalender-Tab heraus — seit v1.2, siehe Verhaltenswechsel oben)
 - **`$HERMES_HOME/hermes-fokus/credentials.json`** (chmod 600): Nextcloud-Host,
   Benutzername, App-Passwort — vom Einrichtungs-Formular geschrieben
 - **`$HERMES_HOME/hermes-fokus/enrichment.json`**: Fokus-Reihenfolge,

@@ -65,7 +65,10 @@ function makeApi(ctx) {
     getSettings: () => call('/settings', 'GET'),
     saveSettings: (host, username, appPassword, calendarName) =>
       call('/settings', 'POST', { host, username, appPassword, calendarName }),
-    capture: title => call('/capture', 'POST', { title }),
+    // Zweites Argument optional: { due: 'YYYY-MM-DD' } fuers '+ Aufgabe an
+    // diesem Tag' aus dem Kalender. Weggelassen bleibt das Verhalten wie vorher.
+    capture: (title, opts) =>
+      call('/capture', 'POST', { title, due: opts && opts.due ? opts.due : undefined }),
     focus: () => call('/focus', 'GET'),
     complete: uid => call('/focus/complete', 'POST', { uid }),
     defer: uid => call('/focus/defer', 'POST', { uid, minutes: DEFER_MINUTES }),
@@ -74,7 +77,15 @@ function makeApi(ctx) {
     // genau so auf wie vorher.
     day: dateStr => call(dateStr ? `/day?date=${dateStr}` : '/day', 'GET'),
     month: (year, monthNum) => call(`/month?year=${year}&month=${monthNum}`, 'GET'),
+    week: startDateStr => call(`/week?start=${startDateStr}`, 'GET'),
     progress: () => call('/progress', 'GET'),
+    listCalendars: () => call('/calendars', 'GET'),
+    createEvent: (title, calendarName, start, end, allDay) =>
+      call('/events', 'POST', { title, calendarName, start, end, allDay }),
+    moveEvent: (uid, calendarName, start, end, allDay) =>
+      call('/events/move', 'POST', { uid, calendarName, start, end, allDay }),
+    setTaskDue: (uid, due) => call('/tasks/due', 'POST', { uid, due }),
+    unscheduled: () => call('/unscheduled', 'GET'),
     reminder: intervalMinutes =>
       call('/reminder/check', 'POST', { intervalMinutes })
   }
@@ -361,6 +372,74 @@ function CelebrationToast({ cheer }) {
     ]
   })
 }
+
+/**
+ * Sicherheitsnetz statt Bestaetigungsdialog: nach jedem Verschieben (Aufgabe
+ * ODER Termin) 6 Sekunden lang "Verschoben — Rückgängig" einblenden. Bei
+ * Terminen ist das PFLICHT (echte Nextcloud-Daten), bei Aufgaben dieselbe
+ * Komponente aus Konsistenzgruenden. Neutraler Ton, kein Konfetti - das ist
+ * keine Feier, das ist ein Ruecknahme-Fenster.
+ */
+function useMoveNotice() {
+  const [notice, setNotice] = useState(null)
+
+  useEffect(() => {
+    if (!notice) return undefined
+    const timer = setTimeout(() => setNotice(null), 6000)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  const announceMove = (label, undo) => {
+    setNotice({ label, undo })
+  }
+
+  const dismiss = () => setNotice(null)
+
+  return { notice, announceMove, dismiss }
+}
+
+function MoveToast({ notice, onUndo }) {
+  if (!notice) return null
+  return jsxs('div', {
+    style: {
+      position: 'absolute',
+      bottom: '14px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 2,
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      borderRadius: '999px',
+      border: '1px solid var(--ui-stroke-secondary)',
+      padding: '7px 8px 7px 16px',
+      background: 'var(--ui-bg-secondary)',
+      fontSize: '0.8rem',
+      color: 'var(--ui-text-secondary)'
+    },
+    children: [
+      jsx('span', { children: notice.label }),
+      jsx('button', {
+        type: 'button',
+        onClick: () => onUndo(notice),
+        style: {
+          font: 'inherit',
+          fontWeight: 700,
+          fontSize: '0.78rem',
+          color: 'var(--ui-accent)',
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          padding: '4px 8px'
+        },
+        children: 'Rückgängig'
+      })
+    ]
+  })
+}
+
+const DND_TASK = 'application/x-hermes-task'
+const DND_EVENT = 'application/x-hermes-event'
 
 // ---------------------------------------------------------------- Bausteine
 
@@ -1080,7 +1159,7 @@ function NavButton({ label, title, onClick }) {
   })
 }
 
-function MonthGrid({ year, month, days, loading, onPick }) {
+function MonthGrid({ year, month, days, loading, onPick, onDropTask }) {
   const first = new Date(year, month - 1, 1)
   // getDay() zaehlt ab Sonntag, das Raster beginnt am Montag.
   const lead = (first.getDay() + 6) % 7
@@ -1092,7 +1171,7 @@ function MonthGrid({ year, month, days, loading, onPick }) {
 
   const cells = []
   for (let i = 0; i < lead; i += 1) {
-    cells.push(jsx('div', { style: { minHeight: '64px' } }, `lead-${i}`))
+    cells.push(jsx('div', { style: { minHeight: '92px' } }, `lead-${i}`))
   }
   for (let day = 1; day <= total; day += 1) {
     const key = dayKeyOf(year, month, day)
@@ -1106,6 +1185,15 @@ function MonthGrid({ year, month, days, loading, onPick }) {
       jsxs('button', {
         type: 'button',
         onClick: () => onPick(key),
+        onDragOver: event => event.preventDefault(),
+        onDrop: event => {
+          event.preventDefault()
+          const taskPayload = event.dataTransfer.getData(DND_TASK)
+          if (taskPayload) {
+            const parsed = JSON.parse(taskPayload)
+            onDropTask(parsed.uid, key, parsed.due)
+          }
+        },
         style: {
           font: 'inherit',
           textAlign: 'left',
@@ -1115,8 +1203,8 @@ function MonthGrid({ year, month, days, loading, onPick }) {
             isToday ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)'
           }`,
           borderRadius: '10px',
-          padding: '7px 8px',
-          minHeight: '64px',
+          padding: '9px 10px',
+          minHeight: '92px',
           display: 'flex',
           flexDirection: 'column',
           gap: '4px'
@@ -1165,7 +1253,7 @@ function MonthGrid({ year, month, days, loading, onPick }) {
     )
   }
   for (let i = 0; i < trail; i += 1) {
-    cells.push(jsx('div', { style: { minHeight: '64px' } }, `trail-${i}`))
+    cells.push(jsx('div', { style: { minHeight: '92px' } }, `trail-${i}`))
   }
 
   return jsxs('div', {
@@ -1253,27 +1341,559 @@ function DaySection({ label, children }) {
   })
 }
 
+function weekStartOf(dateKey) {
+  const parts = String(dateKey || '').split('-').map(Number)
+  const base = parts.length === 3 ? new Date(parts[0], parts[1] - 1, parts[2]) : new Date()
+  const mondayOffset = (base.getDay() + 6) % 7
+  base.setDate(base.getDate() - mondayOffset)
+  return dayKeyOf(base.getFullYear(), base.getMonth() + 1, base.getDate())
+}
+
+function addDaysToKey(dateKey, delta) {
+  const parts = String(dateKey || '').split('-').map(Number)
+  const base = new Date(parts[0], parts[1] - 1, parts[2])
+  base.setDate(base.getDate() + delta)
+  return dayKeyOf(base.getFullYear(), base.getMonth() + 1, base.getDate())
+}
+
+function weekRangeTitle(startKey) {
+  const start = new Date(...String(startKey).split('-').map((v, i) => (i === 1 ? Number(v) - 1 : Number(v))))
+  const end = new Date(start)
+  end.setDate(end.getDate() + 6)
+  const fmt = d => d.toLocaleDateString('de-DE', { day: 'numeric', month: 'short' })
+  return `${fmt(start)} – ${fmt(end)}`
+}
+
+function hourOf(iso) {
+  const value = new Date(iso)
+  if (Number.isNaN(value.getTime())) return null
+  return value.getHours() + value.getMinutes() / 60
+}
+
+// Stundenraster 06:00-22:00, wie im Vorbild - deckt den ueberwiegenden Teil
+// eines Tages ab, ohne die Spalte auf 24 Reihen zu strecken.
+const WEEK_HOUR_START = 6
+const WEEK_HOUR_END = 22
+const WEEK_HOUR_PX = 48
+
+/** Zieht aus einem ISO-Zeitpunkt + Datumsschluessel ein neues ISO fuer eine
+ * andere Stunde - fuers vertikale Draggen in der Wochenansicht. */
+function withHour(dateKey, hourFloat) {
+  const parts = String(dateKey).split('-').map(Number)
+  const h = Math.floor(hourFloat)
+  const m = Math.round((hourFloat - h) * 60)
+  const d = new Date(parts[0], parts[1] - 1, parts[2], h, m, 0, 0)
+  return d.toISOString()
+}
+
+function shiftIso(iso, deltaMs) {
+  const value = new Date(iso)
+  if (Number.isNaN(value.getTime())) return iso
+  return new Date(value.getTime() + deltaMs).toISOString()
+}
+
+/**
+ * "Ungeplante Aufgaben" - Aufgaben ohne Faelligkeit tauchen sonst NIRGENDS im
+ * Kalender auf. Jede Zeile ist der Startpunkt eines Drags: raus aus der
+ * Liste, rein auf einen Tag.
+ */
+function UnscheduledPanel({ tasks, loading }) {
+  return jsxs('div', {
+    style: {
+      width: '260px',
+      flexShrink: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '10px'
+    },
+    children: [
+      jsx('div', {
+        style: {
+          fontSize: '0.68rem',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+          color: 'var(--ui-text-tertiary)'
+        },
+        children: 'Ungeplante Aufgaben'
+      }),
+      loading
+        ? jsx('div', {
+            style: { fontSize: '0.78rem', color: 'var(--ui-text-tertiary)' },
+            children: 'Wird geladen…'
+          })
+        : !tasks.length
+          ? jsx('div', {
+              style: { fontSize: '0.78rem', color: 'var(--ui-text-quaternary)' },
+              children: 'Alles verplant, oder noch nichts erfasst.'
+            })
+          : jsx('div', {
+              style: { display: 'flex', flexDirection: 'column', gap: '6px' },
+              children: tasks.map(task =>
+                jsx('div', {
+                  draggable: true,
+                  onDragStart: event => {
+                    // due: null macht "Ruecknahme" bei einer aus dem Eingang
+                    // gezogenen Aufgabe korrekt: zurueck auf ungeplant.
+                    event.dataTransfer.setData(DND_TASK, JSON.stringify({ uid: task.uid, due: null }))
+                    event.dataTransfer.effectAllowed = 'move'
+                  },
+                  title: 'Auf einen Tag ziehen, um eine Fälligkeit zu setzen',
+                  style: {
+                    border: '1px solid var(--ui-stroke-secondary)',
+                    borderRadius: '9px',
+                    padding: '8px 10px',
+                    fontSize: '0.8rem',
+                    color: 'var(--ui-text-primary)',
+                    cursor: 'grab',
+                    background: 'var(--ui-bg-secondary)'
+                  },
+                  children: task.title
+                }, task.uid)
+              )
+            }),
+      jsx('div', {
+        style: { fontSize: '0.7rem', color: 'var(--ui-text-quaternary)', lineHeight: 1.4 },
+        children: 'Auf einen Tag im Kalender ziehen, um eine Fälligkeit zu setzen.'
+      })
+    ]
+  })
+}
+
+/**
+ * Inline-Formular statt geratener Dialog-Komponente. Termin ODER Aufgabe,
+ * Umschalter oben. calendarNames kommt aus /calendars, leer solange das noch
+ * laedt (Select bleibt dann leer, Speichern-Knopf deaktiviert).
+ */
+function CreateForm({ dateKey, calendarNames, onCreateTask, onCreateEvent, onClose }) {
+  const [kind, setKind] = useState('task')
+  const [title, setTitle] = useState('')
+  const [calendarName, setCalendarName] = useState(calendarNames[0] || '')
+  const [startTime, setStartTime] = useState('09:00')
+  const [allDay, setAllDay] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const titleRef = useRef(null)
+
+  useEffect(() => {
+    const node = titleRef.current
+    if (node && typeof node.focus === 'function') node.focus()
+  }, [])
+
+  useEffect(() => {
+    if (!calendarName && calendarNames.length) setCalendarName(calendarNames[0])
+  }, [calendarNames, calendarName])
+
+  const submit = () => {
+    const text = title.trim()
+    if (!text || busy) return
+    setBusy(true)
+    setError('')
+    let startIso = dateKey
+    let endIso = dateKey
+    if (!allDay) {
+      // Ueber den lokalen Date()-Konstruktor, nicht per String-Verkettung -
+      // sonst liest das Backend die eingetippte Uhrzeit als UTC statt als
+      // Ortszeit (gleiches Prinzip wie withHour() in der Wochenansicht).
+      const [hh, mm] = startTime.split(':').map(Number)
+      const [y, mo, d] = dateKey.split('-').map(Number)
+      const start = new Date(y, mo - 1, d, hh || 0, mm || 0, 0, 0)
+      startIso = start.toISOString()
+      endIso = new Date(start.getTime() + 30 * 60000).toISOString()
+    }
+    const task = kind === 'task'
+      ? onCreateTask(text, dateKey)
+      : onCreateEvent(text, calendarName, startIso, endIso, allDay)
+    Promise.resolve(task)
+      .then(() => onClose())
+      .catch(err => setError(describeError(err)))
+      .then(() => setBusy(false), () => setBusy(false))
+  }
+
+  return jsxs('div', {
+    style: {
+      border: '1px solid var(--ui-stroke-secondary)',
+      borderRadius: '12px',
+      padding: '12px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '10px'
+    },
+    children: [
+      jsxs('div', {
+        style: { display: 'flex', gap: '6px' },
+        children: [
+          jsx(Button, {
+            variant: kind === 'task' ? undefined : 'ghost',
+            onClick: () => setKind('task'),
+            children: 'Aufgabe'
+          }),
+          jsx(Button, {
+            variant: kind === 'event' ? undefined : 'ghost',
+            onClick: () => setKind('event'),
+            children: 'Termin'
+          })
+        ]
+      }),
+      jsx(Input, {
+        ref: titleRef,
+        autoFocus: true,
+        value: title,
+        placeholder: kind === 'task' ? 'Was ist zu tun?' : 'Titel des Termins',
+        onChange: event => setTitle(event.target.value),
+        onKeyDown: event => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            submit()
+          }
+        }
+      }),
+      kind === 'event'
+        ? jsxs('div', {
+            style: { display: 'flex', flexDirection: 'column', gap: '8px' },
+            children: [
+              jsxs('label', {
+                style: {
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '0.8rem',
+                  color: 'var(--ui-text-secondary)'
+                },
+                children: [
+                  jsx('input', {
+                    type: 'checkbox',
+                    checked: allDay,
+                    onChange: event => setAllDay(event.target.checked)
+                  }),
+                  'Ganztägig'
+                ]
+              }),
+              allDay
+                ? null
+                : jsx(Input, {
+                    type: 'time',
+                    value: startTime,
+                    onChange: event => setStartTime(event.target.value)
+                  }),
+              jsx('select', {
+                value: calendarName,
+                onChange: event => setCalendarName(event.target.value),
+                style: {
+                  font: 'inherit',
+                  fontSize: '0.82rem',
+                  padding: '7px 8px',
+                  borderRadius: '8px',
+                  border: '1px solid var(--ui-stroke-secondary)',
+                  background: 'var(--ui-bg-secondary)',
+                  color: 'var(--ui-text-primary)'
+                },
+                children: calendarNames.map(name => jsx('option', { value: name, children: name }, name))
+              })
+            ]
+          })
+        : null,
+      error ? jsx(Notice, { tone: 'quiet', children: error }) : null,
+      jsxs('div', {
+        style: { display: 'flex', gap: '8px' },
+        children: [
+          jsx(Button, {
+            onClick: submit,
+            disabled: busy || !title.trim() || (kind === 'event' && !calendarName),
+            children: busy ? 'Speichert…' : 'Anlegen'
+          }),
+          jsx(Button, { variant: 'ghost', onClick: onClose, disabled: busy, children: 'Abbrechen' })
+        ]
+      })
+    ]
+  })
+}
+
+/**
+ * Stundenraster einer Woche. Termine/faellige Aufgaben mit Uhrzeit sind
+ * absolut positionierte Boxen; alles Ganztaegige liegt in der Kopfzeile.
+ * Draggable in beide Richtungen: horizontal (Tag) und vertikal (Uhrzeit).
+ */
+function WeekGrid({ startKey, days, loading, onOpenDay, onDropTask, onDropEvent }) {
+  const dayKeys = Array.from({ length: 7 }, (_, i) => addDaysToKey(startKey, i))
+  const hours = []
+  for (let h = WEEK_HOUR_START; h <= WEEK_HOUR_END; h += 1) hours.push(h)
+  const gridHeight = (WEEK_HOUR_END - WEEK_HOUR_START) * WEEK_HOUR_PX
+
+  const todayKey = dayKeyOf(new Date().getFullYear(), new Date().getMonth() + 1, new Date().getDate())
+  const nowInWeek = dayKeys.includes(todayKey)
+  const nowTop = ((new Date().getHours() + new Date().getMinutes() / 60 - WEEK_HOUR_START) / (WEEK_HOUR_END - WEEK_HOUR_START)) * gridHeight
+
+  const onDragOverCell = event => event.preventDefault()
+
+  const dropOnCell = (dayKey, hourFloat) => event => {
+    event.preventDefault()
+    const taskPayload = event.dataTransfer.getData(DND_TASK)
+    const eventPayload = event.dataTransfer.getData(DND_EVENT)
+    if (taskPayload) {
+      const parsed = JSON.parse(taskPayload)
+      onDropTask(parsed.uid, dayKey, parsed.due)
+      return
+    }
+    if (eventPayload) {
+      onDropEvent(JSON.parse(eventPayload), dayKey, hourFloat)
+    }
+  }
+
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: '0', opacity: loading ? 0.5 : 1 },
+    children: [
+      jsxs('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: '52px repeat(7, 1fr)',
+          gap: '4px',
+          marginBottom: '6px'
+        },
+        children: [
+          jsx('div', {}),
+          ...dayKeys.map(key => {
+            const isToday = key === todayKey
+            return jsx('button', {
+              type: 'button',
+              onClick: () => onOpenDay(key),
+              style: {
+                font: 'inherit',
+                textAlign: 'center',
+                padding: '6px 4px',
+                borderRadius: '8px',
+                border: 'none',
+                cursor: 'pointer',
+                background: isToday ? 'var(--ui-bg-secondary)' : 'transparent',
+                color: isToday ? 'var(--ui-text-primary)' : 'var(--ui-text-secondary)',
+                fontWeight: isToday ? 800 : 600,
+                fontSize: '0.78rem'
+              },
+              children: new Date(...key.split('-').map((v, i) => (i === 1 ? Number(v) - 1 : Number(v))))
+                .toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric' })
+            }, key)
+          })
+        ]
+      }),
+      // Ganztaegige Zeile - hat keine Stunde, deshalb ausserhalb des Rasters.
+      jsxs('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: '52px repeat(7, 1fr)',
+          gap: '4px',
+          marginBottom: '8px'
+        },
+        children: [
+          jsx('div', {
+            style: { fontSize: '0.62rem', color: 'var(--ui-text-quaternary)', textAlign: 'right', paddingTop: '4px' },
+            children: 'ganztägig'
+          }),
+          ...dayKeys.map(key => {
+            const entry = days[key] || { tasks: [], events: [] }
+            const allDayItems = [
+              ...entry.tasks.filter(t => t.dueAllDay).map(t => ({ ...t, kind: 'task' })),
+              ...entry.events.filter(e => e.allDay)
+            ]
+            return jsx('div', {
+              onDragOver: onDragOverCell,
+              onDrop: dropOnCell(key, WEEK_HOUR_START),
+              style: {
+                minHeight: '22px',
+                border: '1px dashed var(--ui-stroke-secondary)',
+                borderRadius: '6px',
+                padding: '2px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '2px'
+              },
+              children: allDayItems.map(item =>
+                jsx('div', {
+                  draggable: true,
+                  onDragStart: event => {
+                    if (item.kind === 'event') {
+                      event.dataTransfer.setData(DND_EVENT, JSON.stringify(item))
+                    } else {
+                      event.dataTransfer.setData(
+                        DND_TASK,
+                        JSON.stringify({ uid: item.uid, due: item.dueDay || null })
+                      )
+                    }
+                  },
+                  style: {
+                    fontSize: '0.66rem',
+                    padding: '1px 5px',
+                    borderRadius: '5px',
+                    background: item.kind === 'task' ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)',
+                    color: item.kind === 'task' ? 'var(--ui-bg-primary)' : 'var(--ui-text-primary)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis'
+                  },
+                  children: item.title
+                }, `${item.kind}-${item.uid}`)
+              )
+            }, key)
+          })
+        ]
+      }),
+      jsxs('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: '52px repeat(7, 1fr)',
+          gap: '4px',
+          position: 'relative',
+          height: `${gridHeight}px`
+        },
+        children: [
+          jsx('div', {
+            style: { display: 'flex', flexDirection: 'column' },
+            children: hours.map(h =>
+              jsx('div', {
+                style: {
+                  height: `${WEEK_HOUR_PX}px`,
+                  fontSize: '0.62rem',
+                  color: 'var(--ui-text-quaternary)',
+                  textAlign: 'right',
+                  paddingRight: '4px',
+                  fontVariantNumeric: 'tabular-nums'
+                },
+                children: `${String(h).padStart(2, '0')}:00`
+              }, h)
+            )
+          }),
+          ...dayKeys.map(key => {
+            const entry = days[key] || { tasks: [], events: [] }
+            const timed = [
+              ...entry.tasks.filter(t => t.due && !t.dueAllDay).map(t => ({ ...t, kind: 'task' })),
+              ...entry.events.filter(e => !e.allDay)
+            ]
+            return jsxs('div', {
+              style: {
+                position: 'relative',
+                border: '1px solid var(--ui-stroke-secondary)',
+                borderRadius: '6px',
+                background: 'var(--ui-bg-secondary)'
+              },
+              children: [
+                ...hours.map((h, idx) =>
+                  jsx('div', {
+                    onDragOver: onDragOverCell,
+                    onDrop: dropOnCell(key, h),
+                    style: {
+                      position: 'absolute',
+                      top: `${idx * WEEK_HOUR_PX}px`,
+                      left: 0,
+                      right: 0,
+                      height: `${WEEK_HOUR_PX}px`,
+                      borderTop: idx > 0 ? '1px solid var(--ui-stroke-secondary)' : 'none'
+                    }
+                  }, `slot-${h}`)
+                ),
+                nowInWeek && key === todayKey
+                  ? jsx('div', {
+                      style: {
+                        position: 'absolute',
+                        top: `${Math.max(0, Math.min(gridHeight, nowTop))}px`,
+                        left: 0,
+                        right: 0,
+                        height: '2px',
+                        background: 'var(--ui-accent)',
+                        pointerEvents: 'none'
+                      }
+                    })
+                  : null,
+                ...timed.map(item => {
+                  const startHour = hourOf(item.start)
+                  if (startHour == null) return null
+                  const top = Math.max(0, (startHour - WEEK_HOUR_START) * WEEK_HOUR_PX)
+                  const durMin = item.end
+                    ? Math.max(20, (new Date(item.end) - new Date(item.start)) / 60000)
+                    : 30
+                  const height = Math.max(18, (durMin / 60) * WEEK_HOUR_PX)
+                  return jsx('div', {
+                    draggable: true,
+                    onDragStart: event => {
+                      if (item.kind === 'task') {
+                        // Schon terminierte Aufgabe: due traegt das BISHERIGE
+                        // Datum mit, damit Ruecknahme dahin zurueckkann statt
+                        // faelschlich auf "ungeplant" zu setzen.
+                        event.dataTransfer.setData(
+                          DND_TASK,
+                          JSON.stringify({ uid: item.uid, due: item.dueDay || null })
+                        )
+                      } else {
+                        event.dataTransfer.setData(DND_EVENT, JSON.stringify(item))
+                      }
+                    },
+                    title: item.title,
+                    style: {
+                      position: 'absolute',
+                      top: `${top}px`,
+                      left: '2px',
+                      right: '2px',
+                      height: `${height}px`,
+                      borderRadius: '6px',
+                      padding: '2px 6px',
+                      fontSize: '0.68rem',
+                      lineHeight: 1.2,
+                      overflow: 'hidden',
+                      cursor: 'grab',
+                      background: item.kind === 'task' ? 'var(--ui-accent)' : 'var(--ui-bg-primary)',
+                      border: item.kind === 'task' ? 'none' : '1px solid var(--ui-accent)',
+                      color: item.kind === 'task' ? 'var(--ui-bg-primary)' : 'var(--ui-text-primary)'
+                    },
+                    children: item.title
+                  }, `${item.kind}-${item.uid}`)
+                })
+              ]
+            }, key)
+          })
+        ]
+      })
+    ]
+  })
+}
+
 /**
  * Der Ueberblick, den die Fokusansicht bewusst verweigert: ein ganzer Monat auf
- * einen Blick, und pro Tag die Details erst auf Klick. Zwei Zustaende, kein
- * Router - 'month' zeigt das Raster, 'day' den angeklickten Tag.
+ * einen Blick, und pro Tag die Details erst auf Klick. Drei Zustaende, kein
+ * Router - 'month' und 'week' zeigen Raster, 'day' den angeklickten Tag.
  */
-function CalendarView({ api, month, days, loading, onMonth, onRefresh, setError }) {
+function CalendarView({
+  api,
+  month,
+  days,
+  loading,
+  onMonth,
+  onRefresh,
+  unscheduled,
+  unscheduledLoading,
+  onReloadUnscheduled,
+  calendarNames,
+  weekStart,
+  weekDays,
+  weekLoading,
+  onWeekStart,
+  onReloadWeek,
+  setError
+}) {
   const [mode, setMode] = useState('month')
+  // Wohin fuehrt "Zurueck" aus der Tagesansicht? Wird beim Betreten von 'day'
+  // festgehalten, nicht aus vorhandenen Daten geraten - ein leeres {}-Objekt
+  // waere sonst truthy und wuerde die Rueckkehr immer auf 'week' ziehen.
+  const [returnMode, setReturnMode] = useState('month')
   const [selected, setSelected] = useState('')
   const [dayData, setDayData] = useState({ tasks: [], events: [] })
   const [dayLoading, setDayLoading] = useState(false)
   const [busyUid, setBusyUid] = useState('')
+  const [creating, setCreating] = useState(false)
   const { cheer, announce } = useCelebration()
+  const { notice, announceMove, dismiss } = useMoveNotice()
 
-  // Eigener Ladezyklus, bewusst getrennt vom Tagesuebersicht-Tab: beide duerfen
-  // unterschiedliche Tage zeigen, ohne sich gegenseitig zu ueberschreiben.
-  useEffect(() => {
-    if (mode !== 'day' || !selected) return undefined
+  const loadDayInto = useCallback(dateKey => {
     let alive = true
     setDayLoading(true)
     api
-      .day(selected)
+      .day(dateKey)
       .then(data => {
         if (!alive) return
         setDayData({
@@ -1296,25 +1916,38 @@ function CalendarView({ api, month, days, loading, onMonth, onRefresh, setError 
     return () => {
       alive = false
     }
-  }, [mode, selected])
+  }, [])
+
+  // Eigener Ladezyklus, bewusst getrennt vom Tagesuebersicht-Tab: beide duerfen
+  // unterschiedliche Tage zeigen, ohne sich gegenseitig zu ueberschreiben.
+  useEffect(() => {
+    if (mode !== 'day' || !selected) return undefined
+    return loadDayInto(selected)
+  }, [mode, selected, loadDayInto])
 
   const open = key => {
+    if (mode === 'month' || mode === 'week') setReturnMode(mode)
     setSelected(key)
     setDayData({ tasks: [], events: [] })
+    setCreating(false)
     setMode('day')
   }
 
-  const shift = delta => {
+  const shiftMonth = delta => {
     const next = new Date(month.year, month.month - 1 + delta, 1)
     onMonth({ year: next.getFullYear(), month: next.getMonth() + 1 })
   }
+
+  const shiftWeek = delta => onWeekStart(addDaysToKey(weekStart, delta * 7))
 
   const goToday = () => {
     const now = new Date()
     const year = now.getFullYear()
     const monthNum = now.getMonth() + 1
+    const todayKey = dayKeyOf(year, monthNum, now.getDate())
     if (year !== month.year || monthNum !== month.month) onMonth({ year, month: monthNum })
-    open(dayKeyOf(year, monthNum, now.getDate()))
+    onWeekStart(weekStartOf(todayKey))
+    open(todayKey)
   }
 
   const complete = uid => {
@@ -1325,17 +1958,120 @@ function CalendarView({ api, month, days, loading, onMonth, onRefresh, setError 
       .complete(uid)
       .then(result => {
         announce(result && result.gamification)
-        // Optimistisch: die Zeile geht sofort. Das Raster im Hintergrund wird
-        // nachgezogen, damit die Zahlen beim Zurueckgehen stimmen.
+        // Optimistisch: die Zeile geht sofort. Raster/Woche/Panel im Hintergrund
+        // nachziehen, damit die Zahlen beim Zurueckgehen stimmen.
         setDayData(current => ({
           tasks: current.tasks.filter(item => item.uid !== uid),
           events: current.events
         }))
-        return onRefresh()
+        onRefresh()
+        onReloadWeek()
+        onReloadUnscheduled()
       })
       .catch(error => setError(describeError(error)))
       .then(() => setBusyUid(''), () => setBusyUid(''))
   }
+
+  // Aufgabe aus dem Seitenpanel (oder von einem anderen Tag) auf einen
+  // Kalendertag ziehen - kein Bestaetigungsdialog, aber ruecknehmbar.
+  const dropTaskOnDay = (uid, dateKey, previousDue) => {
+    api
+      .setTaskDue(uid, dateKey)
+      .then(() => {
+        onRefresh()
+        onReloadWeek()
+        onReloadUnscheduled()
+        if (mode === 'day' && selected) loadDayInto(selected)
+        announceMove('Fälligkeit gesetzt', {
+          kind: 'task',
+          uid,
+          due: previousDue === undefined ? null : previousDue
+        })
+      })
+      .catch(error => setError(describeError(error)))
+  }
+
+  // Termin von einem Tag/einer Stunde auf eine andere ziehen. item traegt die
+  // bisherigen start/end/allDay/calendar-Werte fuer den Ruecknahme-Fall.
+  const dropEventOnSlot = (item, dateKey, hourFloat) => {
+    const allDay = Boolean(item.allDay)
+    const newStart = allDay ? dateKey : withHour(dateKey, hourFloat)
+    const durationMs = item.end && item.start ? new Date(item.end) - new Date(item.start) : 30 * 60000
+    const newEnd = allDay ? dateKey : new Date(new Date(newStart).getTime() + durationMs).toISOString()
+    const previous = { start: item.start, end: item.end, allDay: item.allDay }
+    api
+      .moveEvent(item.uid, item.calendar, newStart, newEnd, allDay)
+      .then(() => {
+        onRefresh()
+        onReloadWeek()
+        if (mode === 'day' && selected) loadDayInto(selected)
+        announceMove('Termin verschoben', {
+          kind: 'event',
+          uid: item.uid,
+          calendarName: item.calendar,
+          ...previous
+        })
+      })
+      .catch(error => setError(describeError(error)))
+  }
+
+  const undoMove = target => {
+    dismiss()
+    if (!target) return
+    if (target.kind === 'task') {
+      api
+        .setTaskDue(target.uid, target.due)
+        .then(() => {
+          onRefresh()
+          onReloadWeek()
+          onReloadUnscheduled()
+          if (mode === 'day' && selected) loadDayInto(selected)
+        })
+        .catch(error => setError(describeError(error)))
+      return
+    }
+    api
+      .moveEvent(target.uid, target.calendarName, target.start, target.end, target.allDay)
+      .then(() => {
+        onRefresh()
+        onReloadWeek()
+        if (mode === 'day' && selected) loadDayInto(selected)
+      })
+      .catch(error => setError(describeError(error)))
+  }
+
+  const createTask = (title, dateKey) => api.capture(title, { due: dateKey }).then(() => {
+    onRefresh()
+    onReloadWeek()
+    onReloadUnscheduled()
+    if (mode === 'day' && selected) loadDayInto(selected)
+  })
+
+  const createEvent = (title, calendarName, start, end, allDay) =>
+    api.createEvent(title, calendarName, start, end, allDay).then(() => {
+      onRefresh()
+      onReloadWeek()
+      if (mode === 'day' && selected) loadDayInto(selected)
+    })
+
+  const modeSwitch = jsxs('div', {
+    style: { display: 'flex', gap: '4px' },
+    children: [
+      jsx(NavButton, {
+        label: 'Monat',
+        title: 'Monatsansicht',
+        onClick: () => setMode('month')
+      }),
+      jsx(NavButton, {
+        label: 'Woche',
+        title: 'Wochenansicht',
+        onClick: () => {
+          onWeekStart(weekStartOf(selected || dayKeyOf(month.year, month.month, 1)))
+          setMode('week')
+        }
+      })
+    ]
+  })
 
   if (mode === 'day') {
     const tasks = dayData.tasks
@@ -1347,30 +2083,42 @@ function CalendarView({ api, month, days, loading, onMonth, onRefresh, setError 
         display: 'flex',
         flexDirection: 'column',
         gap: '16px',
-        maxWidth: '620px',
+        maxWidth: '680px',
         margin: '0 auto',
         width: '100%'
       },
       children: [
         jsx(CelebrationToast, { cheer }),
+        jsx(MoveToast, { notice, onUndo: undoMove }),
         jsxs('div', {
-          style: { display: 'flex', alignItems: 'center', gap: '10px' },
+          style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
           children: [
             jsx(NavButton, {
-              label: '← Zurück zum Monat',
-              title: 'Zurück zur Monatsansicht',
-              onClick: () => setMode('month')
+              label: '← Zurück',
+              title: 'Zurück zur Kalenderübersicht',
+              onClick: () => setMode(returnMode)
             }),
             jsx('div', {
-              style: {
-                fontWeight: 700,
-                fontSize: '0.95rem',
-                color: 'var(--ui-text-primary)'
-              },
+              style: { fontWeight: 700, fontSize: '0.95rem', color: 'var(--ui-text-primary)' },
               children: longDate(selected)
+            }),
+            jsx('div', { style: { flex: 1 } }),
+            jsx(NavButton, {
+              label: creating ? 'Schließen' : '+ Neu',
+              title: 'Aufgabe oder Termin anlegen',
+              onClick: () => setCreating(current => !current)
             })
           ]
         }),
+        creating
+          ? jsx(CreateForm, {
+              dateKey: selected,
+              calendarNames,
+              onCreateTask: createTask,
+              onCreateEvent: createEvent,
+              onClose: () => setCreating(false)
+            })
+          : null,
         dayLoading
           ? jsx('div', {
               style: { color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' },
@@ -1420,21 +2168,59 @@ function CalendarView({ api, month, days, loading, onMonth, onRefresh, setError 
     })
   }
 
+  if (mode === 'week') {
+    return jsxs('div', {
+      style: {
+        position: 'relative',
+        padding: '16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '14px',
+        width: '100%'
+      },
+      children: [
+        jsx(MoveToast, { notice, onUndo: undoMove }),
+        jsxs('div', {
+          style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+          children: [
+            modeSwitch,
+            jsx(NavButton, { label: '←', title: 'Vorige Woche', onClick: () => shiftWeek(-1) }),
+            jsx('div', {
+              style: { fontWeight: 700, fontSize: '0.9rem', color: 'var(--ui-text-primary)' },
+              children: weekRangeTitle(weekStart)
+            }),
+            jsx(NavButton, { label: '→', title: 'Nächste Woche', onClick: () => shiftWeek(1) }),
+            jsx(NavButton, { label: 'Heute', title: 'Zur aktuellen Woche', onClick: goToday })
+          ]
+        }),
+        jsx(WeekGrid, {
+          startKey: weekStart,
+          days: weekDays || {},
+          loading: weekLoading,
+          onOpenDay: open,
+          onDropTask: (uid, dateKey, previousDue) => dropTaskOnDay(uid, dateKey, previousDue),
+          onDropEvent: (item, dateKey, hourFloat) => dropEventOnSlot(item, dateKey, hourFloat)
+        })
+      ]
+    })
+  }
+
   return jsxs('div', {
     style: {
+      position: 'relative',
       padding: '16px',
       display: 'flex',
       flexDirection: 'column',
       gap: '14px',
-      maxWidth: '760px',
-      margin: '0 auto',
       width: '100%'
     },
     children: [
+      jsx(MoveToast, { notice, onUndo: undoMove }),
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', gap: '8px' },
+        style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
         children: [
-          jsx(NavButton, { label: '←', title: 'Voriger Monat', onClick: () => shift(-1) }),
+          modeSwitch,
+          jsx(NavButton, { label: '←', title: 'Voriger Monat', onClick: () => shiftMonth(-1) }),
           jsx('div', {
             style: {
               flex: 1,
@@ -1445,16 +2231,26 @@ function CalendarView({ api, month, days, loading, onMonth, onRefresh, setError 
             },
             children: monthTitle(month.year, month.month)
           }),
-          jsx(NavButton, { label: '→', title: 'Nächster Monat', onClick: () => shift(1) }),
+          jsx(NavButton, { label: '→', title: 'Nächster Monat', onClick: () => shiftMonth(1) }),
           jsx(NavButton, { label: 'Heute', title: 'Zum heutigen Tag', onClick: goToday })
         ]
       }),
-      jsx(MonthGrid, {
-        year: month.year,
-        month: month.month,
-        days: days || {},
-        loading,
-        onPick: open
+      jsxs('div', {
+        style: { display: 'flex', gap: '18px', flexWrap: 'wrap', alignItems: 'flex-start' },
+        children: [
+          jsx('div', {
+            style: { flex: '1 1 480px', minWidth: '320px' },
+            children: jsx(MonthGrid, {
+              year: month.year,
+              month: month.month,
+              days: days || {},
+              loading,
+              onPick: open,
+              onDropTask: (uid, dateKey, previousDue) => dropTaskOnDay(uid, dateKey, previousDue)
+            })
+          }),
+          jsx(UnscheduledPanel, { tasks: unscheduled || [], loading: unscheduledLoading })
+        ]
       })
     ]
   })
@@ -1474,6 +2270,12 @@ function FokusPage({ ctx }) {
   })
   const [monthDays, setMonthDays] = useState({})
   const [monthLoading, setMonthLoading] = useState(false)
+  const [unscheduled, setUnscheduled] = useState([])
+  const [unscheduledLoading, setUnscheduledLoading] = useState(false)
+  const [calendarNames, setCalendarNames] = useState([])
+  const [weekStart, setWeekStart] = useState(() => weekStartOf(''))
+  const [weekDays, setWeekDays] = useState({})
+  const [weekLoading, setWeekLoading] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   // null = wird gerade geprueft; erst danach entscheidet sich, ob das
@@ -1543,6 +2345,30 @@ function FokusPage({ ctx }) {
       .then(() => setMonthLoading(false), () => setMonthLoading(false))
   }, [])
 
+  const loadUnscheduled = useCallback(() => {
+    setUnscheduledLoading(true)
+    return api
+      .unscheduled()
+      .then(data => {
+        setUnscheduled((data && data.tasks) || [])
+        setError('')
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setUnscheduledLoading(false), () => setUnscheduledLoading(false))
+  }, [])
+
+  const loadWeek = useCallback(startKey => {
+    setWeekLoading(true)
+    return api
+      .week(startKey)
+      .then(data => {
+        setWeekDays((data && data.days) || {})
+        setError('')
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setWeekLoading(false), () => setWeekLoading(false))
+  }, [])
+
   useEffect(() => {
     if (configured) void loadFocus()
   }, [configured, loadFocus])
@@ -1560,6 +2386,20 @@ function FokusPage({ ctx }) {
     if (!configured || tab !== 'kalender') return
     void loadMonth(calMonth.year, calMonth.month)
   }, [configured, tab, calMonth, loadMonth])
+
+  useEffect(() => {
+    if (!configured || tab !== 'kalender') return
+    void loadUnscheduled()
+    void api.listCalendars().then(
+      data => setCalendarNames((data && data.calendars) || []),
+      () => setCalendarNames([])
+    )
+  }, [configured, tab, loadUnscheduled])
+
+  useEffect(() => {
+    if (!configured || tab !== 'kalender') return
+    void loadWeek(weekStart)
+  }, [configured, tab, weekStart, loadWeek])
 
   const capture = value => {
     setBusy(true)
@@ -1616,6 +2456,15 @@ function FokusPage({ ctx }) {
                     loading: monthLoading,
                     onMonth: setCalMonth,
                     onRefresh: () => loadMonth(calMonth.year, calMonth.month),
+                    unscheduled,
+                    unscheduledLoading,
+                    onReloadUnscheduled: loadUnscheduled,
+                    calendarNames,
+                    weekStart,
+                    weekDays,
+                    weekLoading,
+                    onWeekStart: setWeekStart,
+                    onReloadWeek: () => loadWeek(weekStart),
                     setError
                   })
                 : jsx(TagView, { items: day.items || [], date: day.date, loading: dayLoading })

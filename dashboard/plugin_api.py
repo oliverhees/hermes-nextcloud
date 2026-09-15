@@ -937,6 +937,81 @@ def _month_view(principal, cfg: dict, calendar, gamification: dict, year: int, m
     return {"year": year, "month": month, "days": days}
 
 
+def _event_view(comp, calendar_name: str) -> dict:
+    return {
+        "kind": "event",
+        "uid": _ical_text(comp, "UID"),
+        "title": _ical_text(comp, "SUMMARY") or "(ohne Titel)",
+        "start": _iso(_ical_dt(comp, "DTSTART")),
+        "end": _iso(_ical_dt(comp, "DTEND")),
+        "allDay": _is_all_day(comp, "DTSTART"),
+        "calendar": calendar_name,
+    }
+
+
+def _find_calendar(principal, calendar_name: str):
+    try:
+        calendars = principal.calendars()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Kalenderliste nicht abrufbar: {exc}"
+        ) from exc
+    for cal in calendars:
+        if _calendar_name(cal) == calendar_name:
+            return cal
+    raise HTTPException(status_code=404, detail=f"Kalender '{calendar_name}' nicht gefunden.")
+
+
+def _find_event(principal, calendar_name: str, uid: str):
+    """Findet ein VEVENT anhand Kalendername + UID - anders als Aufgaben leben
+    Termine in einem von mehreren Kalendern, die UID allein reicht nicht."""
+    cal = _find_calendar(principal, calendar_name)
+    try:
+        found = cal.event_by_uid(uid)
+        if found is not None:
+            return found
+    except Exception:
+        pass
+    # Nicht jede Server-/Bibliotheksfassung beantwortet event_by_uid; der
+    # lineare Weg ist langsamer, findet den Termin aber trotzdem (Muster wie
+    # bei _find_todo).
+    try:
+        candidates = cal.search(event=True, expand=False)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Termin nicht abrufbar: {exc}") from exc
+    for item in candidates:
+        comp = _component(item)
+        if comp is not None and _ical_text(comp, "UID") == uid:
+            return item
+    raise HTTPException(
+        status_code=404, detail=f"Termin {uid} existiert nicht (mehr) in '{calendar_name}'."
+    )
+
+
+def _parse_moment(raw: str, all_day: bool) -> dt.date | dt.datetime:
+    """Ein Frontend-Zeitpunkt (ISO-Datum oder ISO-Datetime) wird zu dem, was
+    icalendar fuer DTSTART/DTEND/DUE erwartet: ein reines date bei Ganztags-
+    Eintraegen (sonst rutscht es an Zeitzonengrenzen, siehe _local_day_key),
+    sonst ein zeitzonenbehaftetes datetime."""
+    text = str(raw or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Ein Zeitfeld fehlt oder ist leer.")
+    if all_day:
+        try:
+            return dt.date.fromisoformat(text[:10])
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"'{text}' ist kein gueltiges Datum (YYYY-MM-DD)."
+            )
+    try:
+        value = dt.datetime.fromisoformat(text)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail=f"'{text}' ist kein gueltiger Zeitpunkt (ISO 8601)."
+        )
+    return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+
+
 # ---------------------------------------------------------------- Routen
 
 
@@ -1031,12 +1106,25 @@ async def save_settings(body: dict) -> dict:
 @router.post("/capture")
 async def capture(body: dict) -> dict:
     """Brain-Dump: Text rein, VTODO raus. Kein Zwischenspeicher, der bei einem
-    Absturz verloren gehen koennte."""
+    Absturz verloren gehen koennte. Optionales 'due' setzt die Faelligkeit
+    direkt - der Weg fuer '+ Aufgabe an diesem Tag' aus dem Kalender-Tab.
+    Ohne 'due' (der bisherige Normalfall) aendert sich nichts."""
     title = _body_str(body, "title")[:MAX_TITLE_LEN]
+    due_raw = (body or {}).get("due")
+    due_date = None
+    if due_raw:
+        try:
+            due_date = dt.date.fromisoformat(str(due_raw)[:10])
+        except ValueError:
+            raise HTTPException(status_code=422, detail="'due' muss YYYY-MM-DD oder leer sein.")
+
     principal, cfg = _principal()
     calendar = _task_calendar(principal, cfg)
     try:
-        todo = calendar.save_todo(summary=title, status="NEEDS-ACTION")
+        if due_date is not None:
+            todo = calendar.save_todo(summary=title, status="NEEDS-ACTION", due=due_date)
+        else:
+            todo = calendar.save_todo(summary=title, status="NEEDS-ACTION")
     except Exception as exc:
         raise HTTPException(
             status_code=502, detail=f"Aufgabe konnte nicht gespeichert werden: {exc}"
@@ -1306,6 +1394,201 @@ async def month_overview(year: int, month: int) -> dict:
     calendar = _task_calendar(principal, cfg)
     state = _read_enrichment()
     return _month_view(principal, cfg, calendar, state["gamification"], year, month)
+
+
+@router.get("/calendars")
+async def list_calendars() -> dict:
+    """Welche Kalender gibt es ausser dem Aufgaben-Kalender? Fuers Auswahlmenu
+    beim Termin-Anlegen."""
+    principal, cfg = _principal()
+    try:
+        calendars = principal.calendars()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Kalenderliste nicht abrufbar: {exc}"
+        ) from exc
+    names = [n for n in (_calendar_name(c) for c in calendars) if n and n != cfg["calendar_name"]]
+    return {"calendars": names, "default": names[0] if names else None}
+
+
+@router.post("/events")
+async def create_event(body: dict) -> dict:
+    """Legt einen echten Termin in einem regulaeren Nextcloud-Kalender an -
+    NICHT im Fokus-Aufgaben-Kalender, der bleibt Aufgaben vorbehalten."""
+    title = _body_str(body, "title")[:MAX_TITLE_LEN]
+    calendar_name = _body_str(body, "calendarName")
+    all_day = bool((body or {}).get("allDay"))
+    start_raw = _body_str(body, "start")
+    end_raw = _body_str(body, "end", required=False) or start_raw
+
+    principal, cfg = _principal()
+    if calendar_name == cfg["calendar_name"]:
+        raise HTTPException(
+            status_code=422,
+            detail="Termine landen nicht im Fokus-Aufgaben-Kalender - dafuer gibt es /capture.",
+        )
+    cal = _find_calendar(principal, calendar_name)
+    start_value = _parse_moment(start_raw, all_day)
+    end_value = _parse_moment(end_raw, all_day)
+
+    try:
+        event = cal.save_event(dtstart=start_value, dtend=end_value, summary=title)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Termin konnte nicht gespeichert werden: {exc}"
+        ) from exc
+
+    comp = _component(event)
+    if comp is None:
+        raise HTTPException(
+            status_code=502, detail="Termin ohne lesbare VEVENT-Komponente angelegt."
+        )
+    return {"ok": True, "event": _event_view(comp, calendar_name)}
+
+
+@router.post("/events/move")
+async def move_event(body: dict) -> dict:
+    """Verschiebt einen bestehenden Termin (Drag-and-Drop). Start UND Ende
+    kommen explizit vom Frontend mit - die Dauer wird nicht automatisch
+    beibehalten, das Frontend kennt sie beim Draggen bereits. Das ist der
+    einzige Weg, der Olivers echte Nextcloud-Termine schreibt; das Frontend
+    muss dafuer nach jedem Aufruf einen Rueckgaengig-Hinweis zeigen."""
+    uid = _body_str(body, "uid")
+    calendar_name = _body_str(body, "calendarName")
+    all_day = bool((body or {}).get("allDay"))
+    start_raw = _body_str(body, "start")
+    end_raw = _body_str(body, "end")
+
+    principal, _cfg = _principal()
+    event = _find_event(principal, calendar_name, uid)
+    comp = _component(event)
+    if comp is None:
+        raise HTTPException(status_code=502, detail="Termin hat keine lesbare VEVENT-Komponente.")
+
+    start_value = _parse_moment(start_raw, all_day)
+    end_value = _parse_moment(end_raw, all_day)
+    comp.pop("DTSTART", None)
+    comp.pop("DTEND", None)
+    comp.add("DTSTART", start_value)
+    comp.add("DTEND", end_value)
+    try:
+        event.save()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Termin nicht verschiebbar: {exc}") from exc
+    return {"ok": True, "event": _event_view(comp, calendar_name)}
+
+
+@router.post("/tasks/due")
+async def set_task_due(body: dict) -> dict:
+    """Setzt (oder loescht mit due=null) das Faelligkeitsdatum einer Aufgabe -
+    fuers Drag-and-Drop einer Aufgabe auf einen Kalendertag. Getrennt von
+    /focus/defer (das ist Snooze in der Fokus-Reihenfolge, etwas anderes)."""
+    uid = _body_str(body, "uid")
+    due_raw = (body or {}).get("due")
+    principal, cfg = _principal()
+    calendar = _task_calendar(principal, cfg)
+    todo = _find_todo(calendar, uid)
+    comp = _component(todo)
+    if comp is None:
+        raise HTTPException(status_code=502, detail="Aufgabe hat keine lesbare VTODO-Komponente.")
+
+    if due_raw:
+        try:
+            due_date = dt.date.fromisoformat(str(due_raw)[:10])
+        except ValueError:
+            raise HTTPException(status_code=422, detail="'due' muss YYYY-MM-DD oder null sein.")
+        comp.pop("DUE", None)
+        comp.add("DUE", due_date)
+    else:
+        comp.pop("DUE", None)
+
+    try:
+        todo.save()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Faelligkeit nicht speicherbar: {exc}"
+        ) from exc
+
+    view = _todo_view(todo) or {}
+    return {"ok": True, "task": view}
+
+
+@router.get("/unscheduled")
+async def unscheduled_tasks() -> dict:
+    """Offene Aufgaben OHNE Faelligkeitsdatum - der 'Ungeplante Aufgaben'-
+    Seitenpanel-Inhalt. Aelteste zuerst, wie ein Eingang es verlangt."""
+    principal, cfg = _principal()
+    calendar = _task_calendar(principal, cfg)
+    state = _read_enrichment()
+    items = [t for t in _open_todos(calendar) if not t.get("due")]
+    items.sort(key=lambda t: t.get("created") or "")
+    for t in items:
+        t["subtasks"] = _peek(state, t["uid"]).get("subtasks") or []
+    return {"tasks": items}
+
+
+@router.get("/week")
+async def week_overview(start: str) -> dict:
+    """Sieben Tage in einem Rutsch - fuer die Wochenansicht mit vollen
+    Aufgaben-/Termin-Listen (anders als /month, das nur Zahlen liefert). Ein
+    search() pro Kalender ueber die ganze Woche, nicht sieben pro Tag."""
+    try:
+        start_date = dt.date.fromisoformat(start.strip())
+    except ValueError:
+        raise HTTPException(status_code=422, detail="'start' muss YYYY-MM-DD sein.")
+    if start_date >= dt.date(dt.MAXYEAR, 12, 25):
+        raise HTTPException(status_code=422, detail="'start' liegt zu nah am darstellbaren Ende.")
+
+    principal, cfg = _principal()
+    calendar = _task_calendar(principal, cfg)
+    state = _read_enrichment()
+
+    week_start = _local_day_start(start_date)
+    week_end = _local_day_start(start_date + dt.timedelta(days=7))
+
+    events_by_day: dict[str, list[dict]] = {}
+    allowed = cfg["read_calendars"]
+    try:
+        calendars = principal.calendars()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Kalenderliste nicht abrufbar: {exc}"
+        ) from exc
+    for cal in calendars:
+        name = _calendar_name(cal)
+        if name == cfg["calendar_name"]:
+            continue
+        if allowed is not None and name not in allowed:
+            continue
+        try:
+            found = cal.search(start=week_start, end=week_end, event=True, expand=True)
+        except Exception:
+            continue
+        for item in found:
+            comp = _component(item)
+            if comp is None:
+                continue
+            key = _local_day_key(comp, "DTSTART")
+            if key is None:
+                continue
+            events_by_day.setdefault(key, []).append(_event_view(comp, name))
+
+    tasks_by_day: dict[str, list[dict]] = {}
+    for task in _open_todos(calendar):
+        key = task.get("dueDay")
+        if not key:
+            continue
+        task["subtasks"] = _peek(state, task["uid"]).get("subtasks") or []
+        tasks_by_day.setdefault(key, []).append(task)
+
+    days: dict[str, dict] = {}
+    for offset in range(7):
+        key = (start_date + dt.timedelta(days=offset)).isoformat()
+        days[key] = {
+            "tasks": sorted(tasks_by_day.get(key, []), key=lambda t: _sort_key(state, t)),
+            "events": sorted(events_by_day.get(key, []), key=lambda e: str(e.get("start") or "")),
+        }
+    return {"start": start_date.isoformat(), "days": days}
 
 
 @router.post("/reminder/check")
