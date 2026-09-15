@@ -7,17 +7,21 @@ niemals eine Kopie von Titel oder Status (ISC-26).
 
 Routen liegen unter /api/plugins/hermes-fokus/ und damit hinter dem Auth-Gate.
 
-Fehlt die Nextcloud-Konfiguration oder die caldav-Bibliothek, antwortet jede
-Route mit einem klaren 4xx/503 statt den ganzen Router beim Import zu sprengen -
-ein Plugin, das den Gateway-Start bricht, ist schlimmer als eins, das sagt was
-ihm fehlt.
+Fehlt die Nextcloud-Konfiguration, antwortet jede Route mit einem klaren 4xx
+statt den ganzen Router beim Import zu sprengen - ein Plugin, das den
+Gateway-Start bricht, ist schlimmer als eins, das sagt was ihm fehlt. Fehlt die
+caldav-Bibliothek, installiert dieses Modul sie beim ersten Laden selbst nach
+(ueber sys.executable, also plattformunabhaengig - siehe _ensure_caldav()).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -33,17 +37,57 @@ DEFAULT_SNOOZE_MINUTES = 60
 MAX_TITLE_LEN = 500
 MAX_SUBTASKS = 20
 
-# caldav ist eine externe Abhaengigkeit und in Hermes' venv nicht vorinstalliert.
-# Der Import darf den Router-Import nicht toeten, sonst startet das Gateway mit
-# "Failed to load plugin hermes-fokus API routes" und Oliver sieht nur 404er,
-# ohne zu erfahren woran es liegt.
-try:  # pragma: no cover - Umgebungsabhaengig
-    import caldav as _caldav
 
-    _CALDAV_ERROR = ""
-except Exception as exc:  # pragma: no cover - Umgebungsabhaengig
-    _caldav = None
-    _CALDAV_ERROR = str(exc)
+def _ensure_caldav():
+    """caldav ist in Hermes' venv nicht vorinstalliert. Statt Oliver (oder wer
+    auch immer das Plugin installiert) auf einen manuellen pip-Befehl zu
+    verweisen, installiert dieses Modul die Bibliothek beim ersten Laden selbst
+    nach - ueber `sys.executable -m pip`, also denselben Interpreter, in dem
+    Hermes gerade laeuft. Das funktioniert identisch unter Linux, macOS und
+    Windows, weil es kein Shell-Kommando ist, sondern ein Python-Unterprozess
+    des bereits laufenden Interpreters.
+
+    Schlaegt die Installation fehl (kein Internet, schreibgeschuetztes venv,
+    kein pip), gibt die Funktion sauber (None, Fehlertext) zurueck statt den
+    Modul-Import zu sprengen - jede Route meldet das dann als 503 mit Grund.
+    """
+    try:
+        import caldav as caldav_module
+
+        return caldav_module, ""
+    except Exception:
+        pass  # nicht vorhanden - unten selbst nachinstallieren
+
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "caldav"],
+            check=True,
+            timeout=180,
+            capture_output=True,
+        )
+    except Exception as exc:  # pragma: no cover - netzwerk-/umgebungsabhaengig
+        detail = getattr(exc, "stderr", None)
+        detail_text = detail.decode("utf-8", "replace")[-400:] if detail else str(exc)
+        return None, f"automatische Installation fehlgeschlagen: {detail_text}"
+
+    try:
+        importlib.invalidate_caches()
+        import caldav as caldav_module
+
+        return caldav_module, ""
+    except Exception as exc:  # pragma: no cover - umgebungsabhaengig
+        return None, f"nach Installation weiterhin nicht importierbar: {exc}"
+
+
+_caldav, _CALDAV_ERROR = _ensure_caldav()
+
+
+def _caldav_missing_detail() -> str:
+    return (
+        "Die Python-Bibliothek 'caldav' fehlt und die automatische Installation "
+        f"beim Laden ist gescheitert ({_CALDAV_ERROR}). Manuell nachholen: "
+        f"{sys.executable} -m pip install caldav - dann Hermes neu starten."
+    )
 
 try:  # pragma: no cover - Umgebungsabhaengig
     import yaml as _yaml
@@ -226,14 +270,7 @@ def _config() -> dict:
 
 def _principal():
     if _caldav is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Die Python-Bibliothek 'caldav' fehlt in dieser Hermes-Umgebung "
-                f"({_CALDAV_ERROR}). Installiere sie in Hermes' venv, z. B.: "
-                "~/.hermes/hermes-agent/venv/bin/pip install caldav"
-            ),
-        )
+        raise HTTPException(status_code=503, detail=_caldav_missing_detail())
     cfg = _config()
     try:
         client = _caldav.DAVClient(
@@ -519,9 +556,7 @@ async def status() -> dict:
     return {
         "ready": _caldav is not None,
         "configured": True,
-        "reason": ""
-        if _caldav is not None
-        else f"Die Python-Bibliothek 'caldav' fehlt ({_CALDAV_ERROR}).",
+        "reason": "" if _caldav is not None else _caldav_missing_detail(),
         "caldav": _caldav is not None,
         "calendar": cfg["calendar_name"],
         "host": cfg["url"],
@@ -571,14 +606,7 @@ async def save_settings(body: dict) -> dict:
     url = _dav_url(host_value)
 
     if _caldav is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Die Python-Bibliothek 'caldav' fehlt in dieser Hermes-Umgebung "
-                f"({_CALDAV_ERROR}). Installiere sie in Hermes' venv, z. B.: "
-                "~/.hermes/hermes-agent/venv/bin/pip install caldav"
-            ),
-        )
+        raise HTTPException(status_code=503, detail=_caldav_missing_detail())
     try:
         client = _caldav.DAVClient(url=url, username=username, password=password)
         client.principal()

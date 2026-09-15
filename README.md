@@ -17,7 +17,8 @@ Snooze-Zeitpunkte.
 | `dashboard/manifest.json` | mountet `plugin_api.py` unter `/api/plugins/hermes-fokus/` |
 | `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher |
 | `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette |
-| `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-fokus/` |
+| `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-fokus/` (Linux/macOS) |
+| `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-fokus\`) |
 
 `dashboard/manifest.json` trägt bewusst **kein** `tab`- und kein `entry`-Feld.
 Beide gehören zum Web-Dashboard-Plugin-System, das mit dem Desktop-SDK nichts zu
@@ -41,33 +42,40 @@ Desktop-Hälfte wird über `desktop/plugin.js` geladen.
 
 ## Installation
 
+**Linux/macOS:**
+
 ```bash
 ./deploy.sh
 ```
 
-Danach Hermes Desktop **komplett** neu starten (nicht nur das Fenster neu
-laden) und in **Capabilities → Plugins** den Eintrag „Fokus" einschalten. Wird
-nur `desktop/plugin.js` geändert, reicht ⌘K → **Reload desktop plugins**.
+**Windows (PowerShell):**
+
+```powershell
+.\deploy.ps1
+```
+
+Beide Skripte kopieren identisch nach `$HERMES_HOME/plugins/hermes-fokus/`
+(Windows-Default: `%LOCALAPPDATA%\hermes`, sonst `~/.hermes`). Danach Hermes
+Desktop **komplett** neu starten (nicht nur das Fenster neu laden) und in
+**Capabilities → Plugins** den Eintrag „Fokus" einschalten. Wird nur
+`desktop/plugin.js` geändert, reicht ⌘K → **Reload desktop plugins**.
+
+Die Python-Bibliothek `caldav` ist in Hermes' venv nicht vorinstalliert — das
+Backend installiert sie beim ersten Laden **selbst nach**, über den bereits
+laufenden Python-Interpreter (`sys.executable -m pip`). Das funktioniert
+identisch unter Linux, macOS und Windows, ohne Shell-Kommando und ohne
+manuellen Schritt. Nur wenn das scheitert (kein Internet, schreibgeschütztes
+venv), meldet `/status` den genauen Grund inklusive Fallback-Befehl.
 
 ## Einrichtung
 
-### 1. `caldav` in Hermes' venv installieren
-
-Das Backend braucht die Python-Bibliothek `caldav`; sie ist in Hermes' venv
-nicht vorinstalliert. Ohne sie antwortet jede Route mit einem klaren 503 statt
-zu crashen — aber es funktioniert eben auch nichts.
-
-```bash
-~/.hermes/hermes-agent/venv/bin/pip install caldav
-```
-
-### 2. Nextcloud-App-Passwort erzeugen
+### 1. Nextcloud-App-Passwort erzeugen
 
 In Nextcloud unter **Einstellungen → Sicherheit → App-Passwort erstellen** ein
 neues Passwort mit dem Namen `hermes-fokus` anlegen. Ein eigenes, nur für dieses
 Plugin — nicht das aus einem anderen Tool wiederverwenden.
 
-### 3. Im Plugin selbst verbinden
+### 2. Im Plugin selbst verbinden
 
 Kein Config-File von Hand editieren. Sobald „Fokus" in der Seitenleiste
 geöffnet wird und noch nichts eingerichtet ist, erscheint ein
@@ -94,7 +102,7 @@ weil manche Setups (Remote-Profile, Scripting) lieber deklarativ bleiben.
 
 </details>
 
-### 4. Plugin-Anzeigename bestätigen
+### 3. Plugin-Anzeigename bestätigen
 
 Aktuell heißt es in der Oberfläche schlicht **Fokus**, mit dem Codicon `target`
 in der Seitenleiste. Beides ist in `desktop/plugin.js` in je einer Zeile
