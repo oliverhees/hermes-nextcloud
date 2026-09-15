@@ -7,7 +7,11 @@ gemeinsame Tagesachse — ohne Rot, ohne Mahnton.
 
 Nextcloud (CalDAV) ist die alleinige Wahrheit für Titel, Termin und Status. Das
 Plugin legt daneben nur ADHS-Zusatzdaten ab: Fokus-Reihenfolge, Teilschritte,
-Snooze-Zeitpunkte.
+Snooze-Zeitpunkte, Fortschritt (XP, Level, Streak, Erfolge).
+
+Erledigen wird belohnt, nie bestraft: es gibt XP, Konfetti und einen
+Fortschritts-Tab, aber keinen XP-Verlust, keinen Malus und kein „Streak
+verloren". Ein ausgelassener Tag setzt den Streak still zurück.
 
 ## Was drin ist
 
@@ -15,8 +19,8 @@ Snooze-Zeitpunkte.
 |---|---|
 | `plugin.yaml` | Agent-Hälfte (Name, Version, Autor) |
 | `dashboard/manifest.json` | mountet `plugin_api.py` unter `/api/plugins/hermes-fokus/` |
-| `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher |
-| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette |
+| `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher, XP-/Erfolgs-Logik |
+| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, drei Tabs (Fokus, Tagesübersicht, Fortschritt), Konfetti-Feier |
 | `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-fokus/` (Linux/macOS) |
 | `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-fokus\`) |
 
@@ -34,10 +38,11 @@ Desktop-Hälfte wird über `desktop/plugin.js` geladen.
 | `POST /settings` | Zugangsdaten testen und **nur bei Erfolg** speichern |
 | `POST /capture` | Brain-Dump-Text → neues VTODO |
 | `GET /focus` | nächste offene Aufgabe nach Fokus-Reihenfolge |
-| `POST /focus/complete` | VTODO auf COMPLETED |
+| `POST /focus/complete` | VTODO auf COMPLETED, verbucht XP/Streak und liefert frische Erfolge zurück |
 | `POST /focus/defer` | ans Ende der Reihenfolge + Snooze, kein Statuswechsel |
 | `POST /focus/breakdown` | Freitext-Teilschritte merken (v1: keine KI) |
 | `GET /day` | Aufgaben + Termine des Tages, zeitsortiert |
+| `GET /progress` | Level, XP, Streak und alle zehn Erfolge für den Fortschritts-Tab (braucht kein Nextcloud) |
 | `POST /reminder/check` | vom Desktop gepollt, sagt ob erinnert werden soll |
 
 ## Installation
@@ -122,7 +127,10 @@ an.
 - **`$HERMES_HOME/hermes-fokus/credentials.json`** (chmod 600): Nextcloud-Host,
   Benutzername, App-Passwort — vom Einrichtungs-Formular geschrieben
 - **`$HERMES_HOME/hermes-fokus/enrichment.json`**: Fokus-Reihenfolge,
-  Teilschritte, Snooze — UID-verschlüsselt, ohne Kopie von Titel oder Status
+  Teilschritte, Snooze — UID-verschlüsselt, ohne Kopie von Titel oder Status —
+  plus der Fortschritt unter `gamification` (XP, Streak, freigeschaltete
+  Erfolge). Ältere Dateien ohne diesen Block werden beim Lesen ergänzt, es geht
+  nichts verloren.
 - **`ctx.storage`** (`hermes.plugin.hermes-fokus.*`): zuletzt gewählter Tab,
   Erinnerungs-Intervall
 

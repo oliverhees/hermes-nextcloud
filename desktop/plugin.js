@@ -19,6 +19,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   host,
+  haptic,
   atom,
   useValue,
   Button,
@@ -70,6 +71,7 @@ function makeApi(ctx) {
     defer: uid => call('/focus/defer', 'POST', { uid, minutes: DEFER_MINUTES }),
     breakdown: (uid, steps) => call('/focus/breakdown', 'POST', { uid, steps }),
     day: () => call('/day', 'GET'),
+    progress: () => call('/progress', 'GET'),
     reminder: intervalMinutes =>
       call('/reminder/check', 'POST', { intervalMinutes })
   }
@@ -98,6 +100,170 @@ function durationOf(item) {
   const to = new Date(item.end).getTime()
   if (Number.isNaN(from) || Number.isNaN(to) || to <= from) return ''
   return `· ${Math.round((to - from) / 60000)} Min`
+}
+
+// ---------------------------------------------------------------- Feier
+//
+// Dopamin auf Knopfdruck: erledigen darf sich kurz gut anfuehlen. Alles hier
+// ist reiner Code - Canvas, CSS, Emoji, keine Bild-Assets.
+
+const CHEERS = [
+  'Boom, erledigt.',
+  'Nächste.',
+  'Sauber.',
+  'Das war’s schon?',
+  'Weiter im Text.',
+  'Punkt gemacht.',
+  'Abgehakt.',
+  'Läuft.',
+  'Einen weniger.',
+  'Zack.',
+  'Schon durch.',
+  'Weg damit.',
+  'Erledigt ist erledigt.'
+]
+
+function pickCheer() {
+  return CHEERS[Math.floor(Math.random() * CHEERS.length)]
+}
+
+function prefersReducedMotion() {
+  try {
+    return Boolean(
+      window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    )
+  } catch (error) {
+    return false
+  }
+}
+
+// Canvas versteht kein var(--…), deshalb werden die Theme-Tokens einmal
+// ausgelesen statt Farben hart einzutragen. Buntheit ist zweitrangig; passend
+// zum aktiven Theme zu bleiben ist wichtiger.
+const CONFETTI_TOKENS = [
+  '--ui-accent',
+  '--ui-text-primary',
+  '--ui-text-secondary',
+  '--ui-text-tertiary'
+]
+
+function confettiPalette() {
+  try {
+    const computed = getComputedStyle(document.documentElement)
+    const tokens = CONFETTI_TOKENS.map(name =>
+      String(computed.getPropertyValue(name) || '').trim()
+    ).filter(Boolean)
+    if (tokens.length) return tokens
+    const fallback = String(getComputedStyle(document.body).color || '').trim()
+    return fallback ? [fallback] : []
+  } catch (error) {
+    return []
+  }
+}
+
+/**
+ * Wirft kurz Partikel ueber den Bildschirm und raeumt sich selbst wieder auf.
+ * Gibt eine Abbruch-Funktion zurueck, damit ein Unmount oder eine schnelle
+ * zweite Feier kein Canvas zuruecklaesst.
+ *
+ * Bei prefers-reduced-motion passiert hier gar nichts - der Erfolgs-Hinweis
+ * erscheint dann nur als statischer Text.
+ */
+function celebrate(count, durationMs) {
+  if (typeof document === 'undefined' || !document.body) return () => {}
+  if (prefersReducedMotion()) return () => {}
+  const colors = confettiPalette()
+  if (!colors.length) return () => {}
+
+  const width = window.innerWidth
+  const height = window.innerHeight
+  if (!width || !height) return () => {}
+  const ratio = window.devicePixelRatio || 1
+
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(width * ratio)
+  canvas.height = Math.round(height * ratio)
+  canvas.style.position = 'fixed'
+  canvas.style.left = '0'
+  canvas.style.top = '0'
+  canvas.style.width = '100%'
+  canvas.style.height = '100%'
+  canvas.style.pointerEvents = 'none'
+  canvas.style.zIndex = '2147483000'
+
+  const paint = canvas.getContext('2d')
+  if (!paint) return () => {}
+  document.body.appendChild(canvas)
+  paint.scale(ratio, ratio)
+
+  const originX = width / 2
+  const originY = height * 0.45
+  const parts = []
+  for (let i = 0; i < count; i += 1) {
+    const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.2
+    const speed = 240 + Math.random() * 340
+    parts.push({
+      x: originX,
+      y: originY,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      size: 4 + Math.random() * 5,
+      rotation: Math.random() * Math.PI,
+      spin: (Math.random() - 0.5) * 14,
+      color: colors[i % colors.length]
+    })
+  }
+
+  let frameId = 0
+  let stopped = false
+  const startedAt = performance.now()
+  let previous = startedAt
+
+  const cleanup = () => {
+    if (stopped) return
+    stopped = true
+    cancelAnimationFrame(frameId)
+    if (canvas.parentNode) canvas.parentNode.removeChild(canvas)
+  }
+
+  const frame = now => {
+    if (stopped) return
+    const elapsed = now - startedAt
+    if (elapsed >= durationMs) {
+      cleanup()
+      return
+    }
+    // Gedeckelt, damit ein Tab-Wechsel (langer Frame-Abstand) die Partikel
+    // nicht in einem Sprung aus dem Bild schiesst.
+    const step = Math.min((now - previous) / 1000, 0.05)
+    previous = now
+
+    paint.clearRect(0, 0, width, height)
+    paint.globalAlpha = Math.max(0, 1 - elapsed / durationMs)
+    for (const part of parts) {
+      part.vy += 900 * step
+      part.x += part.vx * step
+      part.y += part.vy * step
+      part.rotation += part.spin * step
+      paint.save()
+      paint.translate(part.x, part.y)
+      paint.rotate(part.rotation)
+      paint.fillStyle = part.color
+      paint.fillRect(-part.size / 2, -part.size / 2, part.size, part.size * 0.62)
+      paint.restore()
+    }
+    frameId = requestAnimationFrame(frame)
+  }
+
+  frameId = requestAnimationFrame(frame)
+  return cleanup
+}
+
+function tapHaptic() {
+  // Feature-Detect wie bei ctx.onDispose: aeltere Hermes-Fassungen kennen den
+  // Helfer noch nicht, und ein fehlendes Rueckmeldungs-Detail darf das
+  // Erledigen nicht abbrechen.
+  if (typeof haptic === 'function') haptic('tap')
 }
 
 // ---------------------------------------------------------------- Bausteine
@@ -295,7 +461,11 @@ function Tabs({ value, onChange }) {
       padding: '8px 16px 0',
       borderBottom: '1px solid var(--ui-stroke-secondary)'
     },
-    children: [tab('fokus', 'Fokus'), tab('tag', 'Tagesübersicht')]
+    children: [
+      tab('fokus', 'Fokus'),
+      tab('tag', 'Tagesübersicht'),
+      tab('fortschritt', 'Fortschritt')
+    ]
   })
 }
 
@@ -303,6 +473,8 @@ function FokusView({ api, state, reload, setError }) {
   const [breaking, setBreaking] = useState(false)
   const [steps, setSteps] = useState('')
   const [busy, setBusy] = useState(false)
+  const [cheer, setCheer] = useState(null)
+  const confettiRef = useRef(null)
   const task = state.task
 
   useEffect(() => {
@@ -310,12 +482,66 @@ function FokusView({ api, state, reload, setError }) {
     setSteps('')
   }, [task && task.uid])
 
+  // Der Spruch verschwindet von selbst. Timer und Canvas haengen an einem
+  // Cleanup, sonst tickt nach einem Tab-Wechsel ein Timer gegen eine
+  // verschwundene Komponente.
+  useEffect(() => {
+    if (!cheer) return undefined
+    const timer = setTimeout(() => setCheer(null), 2200)
+    return () => clearTimeout(timer)
+  }, [cheer])
+
+  useEffect(
+    () => () => {
+      if (confettiRef.current) confettiRef.current()
+    },
+    []
+  )
+
   const act = fn => {
     if (busy) return
     setBusy(true)
     Promise.resolve()
       .then(fn)
       .then(() => reload())
+      .catch(error => setError(describeError(error)))
+      .then(() => setBusy(false), () => setBusy(false))
+  }
+
+  const announce = reward => {
+    if (!reward || typeof reward.xpGained !== 'number') return
+    const leveledUp = Boolean(reward.leveledUp)
+    if (confettiRef.current) confettiRef.current()
+    confettiRef.current = celebrate(leveledUp ? 70 : 32, leveledUp ? 1500 : 1150)
+    setCheer({
+      text: leveledUp ? `Level ${reward.level}` : pickCheer(),
+      xp: reward.xpGained,
+      leveledUp
+    })
+    const unlocked = Array.isArray(reward.unlockedAchievements)
+      ? reward.unlockedAchievements
+      : []
+    for (const item of unlocked) {
+      // In-App-Toast, nicht ctx.os.notify: die native Meldung bleibt der
+      // sanften Erinnerung vorbehalten und wird nicht mit Erfolgen verwaessert.
+      host.notify({
+        kind: 'success',
+        title: 'Erfolg freigeschaltet',
+        message: item.title
+      })
+    }
+  }
+
+  const complete = () => {
+    if (busy) return
+    tapHaptic()
+    setBusy(true)
+    api
+      .complete(task.uid)
+      .then(result => {
+        announce(result && result.gamification)
+        return reload()
+      })
       .catch(error => setError(describeError(error)))
       .then(() => setBusy(false), () => setBusy(false))
   }
@@ -339,9 +565,47 @@ function FokusView({ api, state, reload, setError }) {
       gap: '18px',
       padding: '28px 24px',
       textAlign: 'center',
-      minHeight: '100%'
+      minHeight: '100%',
+      position: 'relative'
     },
     children: [
+      cheer
+        ? jsxs('div', {
+            style: {
+              position: 'absolute',
+              top: '14px',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 2,
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: '10px',
+              borderRadius: '999px',
+              border: '1px solid var(--ui-accent)',
+              padding: cheer.leveledUp ? '10px 20px' : '7px 16px',
+              background: 'var(--ui-bg-secondary)',
+              pointerEvents: 'none'
+            },
+            children: [
+              jsx('span', {
+                style: {
+                  fontSize: cheer.leveledUp ? '1.05rem' : '0.86rem',
+                  fontWeight: 800,
+                  color: 'var(--ui-text-primary)'
+                },
+                children: cheer.leveledUp ? `🎉 ${cheer.text}` : cheer.text
+              }),
+              jsx('span', {
+                style: {
+                  fontSize: '0.78rem',
+                  fontWeight: 700,
+                  color: 'var(--ui-accent)'
+                },
+                children: `+${cheer.xp} XP`
+              })
+            ]
+          })
+        : null,
       jsx('div', {
         style: {
           fontSize: '0.68rem',
@@ -382,7 +646,7 @@ function FokusView({ api, state, reload, setError }) {
         style: { display: 'flex', gap: '8px', maxWidth: '420px', width: '100%' },
         children: [
           jsx(Button, {
-            onClick: () => act(() => api.complete(task.uid)),
+            onClick: complete,
             disabled: busy,
             style: { flex: 1 },
             children: 'Erledigt'
@@ -554,12 +818,196 @@ function TagView({ items, date, loading }) {
   })
 }
 
+function Kachel({ label, value, hint }) {
+  return jsxs('div', {
+    style: {
+      flex: 1,
+      minWidth: '130px',
+      border: '1px solid var(--ui-stroke-secondary)',
+      borderRadius: '12px',
+      padding: '12px 14px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '3px'
+    },
+    children: [
+      jsx('div', {
+        style: {
+          fontSize: '0.68rem',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+          color: 'var(--ui-text-tertiary)'
+        },
+        children: label
+      }),
+      jsx('div', {
+        style: { fontSize: '1.1rem', fontWeight: 800, color: 'var(--ui-text-primary)' },
+        children: value
+      }),
+      hint
+        ? jsx('div', {
+            style: { fontSize: '0.72rem', color: 'var(--ui-text-quaternary)' },
+            children: hint
+          })
+        : null
+    ]
+  })
+}
+
+function ProgressView({ data, loading }) {
+  if (loading || !data) {
+    return jsx('div', {
+      style: { padding: '24px', color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' },
+      children: 'Fortschritt wird geladen…'
+    })
+  }
+
+  const forNext = data.xpForNextLevel > 0 ? data.xpForNextLevel : 1
+  const filled = Math.max(0, Math.min(100, (data.xpIntoLevel / forNext) * 100))
+  const achievements = Array.isArray(data.achievements) ? data.achievements : []
+
+  return jsxs('div', {
+    style: {
+      padding: '20px 16px 28px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '18px',
+      maxWidth: '620px',
+      margin: '0 auto'
+    },
+    children: [
+      jsxs('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: '8px' },
+        children: [
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'baseline', gap: '10px' },
+            children: [
+              jsx('div', {
+                style: {
+                  fontSize: '1.8rem',
+                  fontWeight: 800,
+                  lineHeight: 1.1,
+                  color: 'var(--ui-text-primary)'
+                },
+                children: `Level ${data.level}`
+              }),
+              jsx('div', {
+                style: { fontSize: '0.78rem', color: 'var(--ui-text-tertiary)' },
+                children: `${data.xpIntoLevel} / ${data.xpForNextLevel} XP`
+              })
+            ]
+          }),
+          jsx('div', {
+            style: {
+              height: '10px',
+              borderRadius: '999px',
+              background: 'var(--ui-stroke-secondary)',
+              overflow: 'hidden'
+            },
+            children: jsx('div', {
+              style: {
+                width: `${filled}%`,
+                height: '100%',
+                background: 'var(--ui-accent)',
+                transition: 'width 320ms ease'
+              }
+            })
+          }),
+          jsx('div', {
+            style: { fontSize: '0.74rem', color: 'var(--ui-text-quaternary)' },
+            children: `${data.xp} XP insgesamt`
+          })
+        ]
+      }),
+      jsxs('div', {
+        style: { display: 'flex', gap: '10px', flexWrap: 'wrap' },
+        children: [
+          jsx(Kachel, {
+            label: 'Streak',
+            // Kein "verloren", kein "unterbrochen": ein ausgelassener Tag ist
+            // neutral. Bei 0 steht hier eine Einladung, kein Vorwurf.
+            value: data.streak > 0 ? `🔥 ${data.streak} Tage` : 'Heute noch nichts erledigt',
+            hint:
+              data.streak > 0
+                ? `Bester Streak: ${data.bestStreak} Tage`
+                : data.bestStreak > 0
+                  ? `Leg los — bester Streak bisher: ${data.bestStreak} Tage`
+                  : 'Leg los'
+          }),
+          jsx(Kachel, {
+            label: 'Heute erledigt',
+            value: String(data.todayCount)
+          }),
+          jsx(Kachel, {
+            label: 'Insgesamt',
+            value: String(data.completedTotal)
+          })
+        ]
+      }),
+      jsxs('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: '10px' },
+        children: [
+          jsx('div', {
+            style: {
+              fontSize: '0.68rem',
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              color: 'var(--ui-text-tertiary)'
+            },
+            children: 'Erfolge'
+          }),
+          jsx('div', {
+            style: {
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+              gap: '10px'
+            },
+            // Gesperrte Erfolge bleiben lesbar: wer weiss, wonach er greift,
+            // kann danach greifen. Raten waere Reibung, keine Motivation.
+            children: achievements.map(item =>
+              jsxs('div', {
+                style: {
+                  border: `1px solid ${
+                    item.unlocked ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)'
+                  }`,
+                  borderRadius: '12px',
+                  padding: '11px 13px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px',
+                  opacity: item.unlocked ? 1 : 0.4
+                },
+                children: [
+                  jsx('div', {
+                    style: {
+                      fontSize: '0.86rem',
+                      fontWeight: 700,
+                      color: 'var(--ui-text-primary)'
+                    },
+                    children: item.unlocked ? `🏆 ${item.title}` : item.title
+                  }),
+                  jsx('div', {
+                    style: { fontSize: '0.75rem', color: 'var(--ui-text-tertiary)' },
+                    children: item.description
+                  })
+                ]
+              }, item.id)
+            )
+          })
+        ]
+      })
+    ]
+  })
+}
+
 function FokusPage({ ctx }) {
   const api = makeApi(ctx)
   const [tab, setTab] = useState(() => ctx.storage.get(STORAGE_TAB_KEY, 'fokus'))
   const [focus, setFocus] = useState({ task: null, inbox: 0 })
   const [day, setDay] = useState({ items: [], date: '' })
   const [dayLoading, setDayLoading] = useState(false)
+  const [progress, setProgress] = useState(null)
+  const [progressLoading, setProgressLoading] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   // null = wird gerade geprueft; erst danach entscheidet sich, ob das
@@ -605,6 +1053,18 @@ function FokusPage({ ctx }) {
       .then(() => setDayLoading(false), () => setDayLoading(false))
   }, [])
 
+  const loadProgress = useCallback(() => {
+    setProgressLoading(true)
+    return api
+      .progress()
+      .then(data => {
+        setProgress(data)
+        setError('')
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setProgressLoading(false), () => setProgressLoading(false))
+  }, [])
+
   useEffect(() => {
     if (configured) void loadFocus()
   }, [configured, loadFocus])
@@ -613,7 +1073,8 @@ function FokusPage({ ctx }) {
     if (!configured) return
     ctx.storage.set(STORAGE_TAB_KEY, tab)
     if (tab === 'tag') void loadDay()
-  }, [configured, tab, loadDay])
+    if (tab === 'fortschritt') void loadProgress()
+  }, [configured, tab, loadDay, loadProgress])
 
   const capture = value => {
     setBusy(true)
@@ -660,7 +1121,9 @@ function FokusPage({ ctx }) {
         children:
           tab === 'fokus'
             ? jsx(FokusView, { api, state: focus, reload, setError })
-            : jsx(TagView, { items: day.items || [], date: day.date, loading: dayLoading })
+            : tab === 'fortschritt'
+              ? jsx(ProgressView, { data: progress, loading: progressLoading })
+              : jsx(TagView, { items: day.items || [], date: day.date, loading: dayLoading })
       })
     ]
   })

@@ -420,8 +420,26 @@ def _find_todo(calendar, uid: str):
 # ---------------------------------------------------------------- Anreicherung
 
 
+def _default_gamification() -> dict:
+    return {
+        "xp": 0,
+        "completedTotal": 0,
+        "completedByDate": {},
+        "streak": 0,
+        "bestStreak": 0,
+        "lastCompletionDate": None,
+        "unlocked": {},
+    }
+
+
 def _default_state() -> dict:
-    return {"schemaVersion": 1, "order": [], "items": {}, "lastReminderAt": None}
+    return {
+        "schemaVersion": 1,
+        "order": [],
+        "items": {},
+        "lastReminderAt": None,
+        "gamification": _default_gamification(),
+    }
 
 
 def _read_enrichment() -> dict:
@@ -437,8 +455,36 @@ def _read_enrichment() -> dict:
             "order": value.get("order") if isinstance(value.get("order"), list) else [],
             "items": value.get("items") if isinstance(value.get("items"), dict) else {},
             "lastReminderAt": value.get("lastReminderAt"),
+            "gamification": _merged_gamification(value.get("gamification")),
         }
     )
+    return base
+
+
+def _merged_gamification(raw: Any) -> dict:
+    """Alte enrichment.json ohne 'gamification' laedt weiter: fehlende Felder
+    werden mit den Defaults aufgefuellt, vorhandene auf ihren Typ geprueft.
+    Ein kaputter Teilwert darf nie den ganzen Fortschritt verwerfen."""
+    base = _default_gamification()
+    if not isinstance(raw, dict):
+        return base
+    for key in ("xp", "completedTotal", "streak", "bestStreak"):
+        try:
+            base[key] = max(0, int(raw.get(key) or 0))
+        except (TypeError, ValueError):
+            pass
+    by_date = raw.get("completedByDate")
+    if isinstance(by_date, dict):
+        for day, count in by_date.items():
+            try:
+                base["completedByDate"][str(day)] = max(0, int(count))
+            except (TypeError, ValueError):
+                continue
+    unlocked = raw.get("unlocked")
+    if isinstance(unlocked, dict):
+        base["unlocked"] = {str(k): str(v) for k, v in unlocked.items()}
+    last = raw.get("lastCompletionDate")
+    base["lastCompletionDate"] = str(last) if last else None
     return base
 
 
@@ -534,6 +580,208 @@ def _body_str(body: Any, key: str, *, required: bool = True) -> str:
     if required and not text:
         raise HTTPException(status_code=422, detail=f"Feld '{key}' fehlt.")
     return text
+
+
+# ---------------------------------------------------------------- Fortschritt
+#
+# Reine Belohnung, nie Bestrafung: es gibt keinen XP-Verlust, keinen Malus und
+# keinen "Streak verloren"-Zustand. Ein ausgelassener Tag setzt den Streak still
+# auf 1 zurueck - ohne Meldung, ohne Text, ohne Farbe. Schuld senkt bei ADHS die
+# Adhaerenz, deshalb kennt dieses Modul das Konzept gar nicht erst.
+
+
+XP_PER_TASK = 10
+XP_SUBTASK_BONUS = 5
+XP_LEVEL_UNIT = 20
+
+
+def _xp_for_level(level: int) -> int:
+    """Umkehrung von _level_from_xp: ab wie viel XP beginnt dieses Level."""
+    return XP_LEVEL_UNIT * (max(1, int(level)) - 1) ** 2
+
+
+def _level_from_xp(xp: int) -> int:
+    """level = 1 + floor(sqrt(xp / 20)) - monoton wachsend, ohne Tabellendatei.
+
+    Ganzzahlig gerechnet statt ueber math.sqrt, damit kein Float-Rundungsfehler
+    einen Level-Up genau an der Schwelle verschluckt.
+    """
+    value = max(0, int(xp))
+    steps = 0
+    while _xp_for_level(steps + 2) <= value:
+        steps += 1
+    return 1 + steps
+
+
+def _level_view(xp: int) -> dict:
+    level = _level_from_xp(xp)
+    floor_xp = _xp_for_level(level)
+    return {
+        "level": level,
+        "xpIntoLevel": int(xp) - floor_xp,
+        "xpForNextLevel": _xp_for_level(level + 1) - floor_xp,
+    }
+
+
+ACHIEVEMENTS: list[dict] = [
+    {
+        "id": "first_task",
+        "title": "Erster Schritt",
+        "description": "Die erste Aufgabe erledigt.",
+        "condition": lambda g, ctx: g["completedTotal"] >= 1,
+    },
+    {
+        "id": "first_breakdown",
+        "title": "Klein gedacht",
+        "description": "Eine zerlegte Aufgabe erledigt.",
+        "condition": lambda g, ctx: bool(ctx.get("hadSubtasks")),
+    },
+    {
+        "id": "five_in_a_day",
+        "title": "Fünferpack",
+        "description": "5 Aufgaben an einem Tag.",
+        "condition": lambda g, ctx: ctx.get("todayCount", 0) >= 5,
+    },
+    {
+        "id": "ten_in_a_day",
+        "title": "Zehnerpack",
+        "description": "10 Aufgaben an einem Tag.",
+        "condition": lambda g, ctx: ctx.get("todayCount", 0) >= 10,
+    },
+    {
+        "id": "total_10",
+        "title": "Zehn erledigt",
+        "description": "Insgesamt 10 Aufgaben geschafft.",
+        "condition": lambda g, ctx: g["completedTotal"] >= 10,
+    },
+    {
+        "id": "total_50",
+        "title": "Fünfzig erledigt",
+        "description": "Insgesamt 50 Aufgaben geschafft.",
+        "condition": lambda g, ctx: g["completedTotal"] >= 50,
+    },
+    {
+        "id": "total_100",
+        "title": "Hundert erledigt",
+        "description": "Insgesamt 100 Aufgaben geschafft.",
+        "condition": lambda g, ctx: g["completedTotal"] >= 100,
+    },
+    {
+        "id": "streak_3",
+        "title": "3 Tage am Stück",
+        "description": "An drei Tagen hintereinander etwas geschafft.",
+        "condition": lambda g, ctx: g["streak"] >= 3,
+    },
+    {
+        "id": "streak_7",
+        "title": "Eine Woche am Stück",
+        "description": "An sieben Tagen hintereinander etwas geschafft.",
+        "condition": lambda g, ctx: g["streak"] >= 7,
+    },
+    {
+        "id": "streak_30",
+        "title": "Ein Monat am Stück",
+        "description": "An dreißig Tagen hintereinander etwas geschafft.",
+        "condition": lambda g, ctx: g["streak"] >= 30,
+    },
+]
+
+
+def _local_today() -> dt.date:
+    """Lokale Zeitzone, nicht UTC: ein Streak orientiert sich am gefuehlten Tag,
+    nicht am Kalender in Greenwich."""
+    return dt.datetime.now().astimezone().date()
+
+
+def _check_achievements(gamification: dict, ctx: dict) -> list[dict]:
+    """Prueft alle noch gesperrten Erfolge gegen den neuen Zustand und schaltet
+    passende frei. Gibt nur die frisch freigeschalteten zurueck."""
+    unlocked = gamification.setdefault("unlocked", {})
+    stamp = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = []
+    for definition in ACHIEVEMENTS:
+        if definition["id"] in unlocked:
+            continue
+        if definition["condition"](gamification, ctx):
+            unlocked[definition["id"]] = stamp
+            fresh.append(
+                {
+                    "id": definition["id"],
+                    "title": definition["title"],
+                    "description": definition["description"],
+                }
+            )
+    return fresh
+
+
+def _apply_completion_gamification(state: dict, had_subtasks: bool) -> dict:
+    """Verbucht genau eine erledigte Aufgabe im Fortschritt und liefert die
+    Antwort fuer die Oberflaeche. Aendert 'state' in-place, laeuft deshalb
+    innerhalb von _mutate_enrichment (also unter dem Lock)."""
+    gamification = state.setdefault("gamification", _default_gamification())
+    level_before = _level_from_xp(gamification["xp"])
+
+    gained = XP_PER_TASK + (XP_SUBTASK_BONUS if had_subtasks else 0)
+    gamification["xp"] += gained
+    gamification["completedTotal"] += 1
+
+    today = _local_today()
+    today_key = today.isoformat()
+    by_date = gamification.setdefault("completedByDate", {})
+    by_date[today_key] = int(by_date.get(today_key) or 0) + 1
+
+    last = gamification.get("lastCompletionDate")
+    if last == today_key:
+        pass  # heute schon gezaehlt - der Streak steht bereits
+    elif last == (today - dt.timedelta(days=1)).isoformat():
+        gamification["streak"] += 1
+    else:
+        gamification["streak"] = 1  # stiller Neustart, kein Verlust-Ereignis
+    gamification["lastCompletionDate"] = today_key
+    gamification["bestStreak"] = max(gamification["bestStreak"], gamification["streak"])
+
+    fresh = _check_achievements(
+        gamification,
+        {"todayCount": by_date[today_key], "hadSubtasks": had_subtasks},
+    )
+
+    view = _level_view(gamification["xp"])
+    return {
+        "xpGained": gained,
+        "xp": gamification["xp"],
+        "level": view["level"],
+        "leveledUp": view["level"] > level_before,
+        "xpIntoLevel": view["xpIntoLevel"],
+        "xpForNextLevel": view["xpForNextLevel"],
+        "streak": gamification["streak"],
+        "unlockedAchievements": fresh,
+    }
+
+
+def _progress_view(gamification: dict) -> dict:
+    view = _level_view(gamification["xp"])
+    unlocked = gamification.get("unlocked") or {}
+    today_key = _local_today().isoformat()
+    return {
+        "xp": gamification["xp"],
+        "level": view["level"],
+        "xpIntoLevel": view["xpIntoLevel"],
+        "xpForNextLevel": view["xpForNextLevel"],
+        "streak": gamification["streak"],
+        "bestStreak": gamification["bestStreak"],
+        "completedTotal": gamification["completedTotal"],
+        "todayCount": int((gamification.get("completedByDate") or {}).get(today_key) or 0),
+        "achievements": [
+            {
+                "id": definition["id"],
+                "title": definition["title"],
+                "description": definition["description"],
+                "unlocked": definition["id"] in unlocked,
+                "unlockedAt": unlocked.get(definition["id"]),
+            }
+            for definition in ACHIEVEMENTS
+        ],
+    }
 
 
 # ---------------------------------------------------------------- Routen
@@ -689,12 +937,22 @@ async def focus_complete(body: dict) -> dict:
                 status_code=502, detail=f"Abschluss nicht speicherbar: {exc}"
             ) from exc
 
+    reward: dict = {}
+
     def drop(state: dict) -> None:
+        # Zuerst verbuchen, dann loeschen: nach dem pop() weiss niemand mehr,
+        # ob die Aufgabe Teilschritte hatte - und genau das gibt den Bonus.
+        had_subtasks = bool(_peek(state, uid).get("subtasks"))
+        reward.update(_apply_completion_gamification(state, had_subtasks))
         state["order"] = [x for x in (state.get("order") or []) if x != uid]
         state.get("items", {}).pop(uid, None)
 
     state = _mutate_enrichment(drop)
-    return {"ok": True, "inbox": _inbox_count(calendar, state)}
+    return {
+        "ok": True,
+        "inbox": _inbox_count(calendar, state),
+        "gamification": reward,
+    }
 
 
 @router.post("/focus/defer")
@@ -746,6 +1004,17 @@ async def focus_breakdown(body: dict) -> dict:
 
     _mutate_enrichment(put)
     return {"ok": True, "uid": uid, "subtasks": steps}
+
+
+@router.get("/progress")
+async def progress() -> dict:
+    """Level, XP, Streak und Erfolge fuer den Fortschritts-Tab.
+
+    Braucht bewusst kein Nextcloud: der Fortschritt liegt vollstaendig in
+    enrichment.json, also bleibt dieser Tab auch dann lesbar, wenn die
+    Verbindung gerade haengt.
+    """
+    return _progress_view(_read_enrichment()["gamification"])
 
 
 @router.get("/day")
