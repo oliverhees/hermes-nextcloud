@@ -36,6 +36,7 @@ const ID = 'hermes-nextcloud'
 const ROUTE = '/hermes-nextcloud'
 const STORAGE_REMINDER_KEY = 'reminderMinutes'
 const STORAGE_TAB_KEY = 'lastTab'
+const STORAGE_ADHS_KEY = 'adhsMode'
 const DEFAULT_REMINDER_MINUTES = 50
 const REMINDER_POLL_MS = 5 * 60 * 1000
 const DEFER_MINUTES = 60
@@ -87,7 +88,16 @@ function makeApi(ctx) {
     setTaskDue: (uid, due) => call('/tasks/due', 'POST', { uid, due }),
     unscheduled: () => call('/unscheduled', 'GET'),
     reminder: intervalMinutes =>
-      call('/reminder/check', 'POST', { intervalMinutes })
+      call('/reminder/check', 'POST', { intervalMinutes }),
+    notesList: () => call('/notes', 'GET'),
+    noteGet: id => call(`/notes/${id}`, 'GET'),
+    noteCreate: (title, content) => call('/notes', 'POST', { title, content }),
+    noteUpdate: (id, patch) => call(`/notes/${id}`, 'PUT', patch),
+    noteDelete: id => call(`/notes/${id}`, 'DELETE'),
+    deckBoards: () => call('/deck/boards', 'GET'),
+    deckBoard: id => call(`/deck/boards/${id}`, 'GET'),
+    contacts: () => call('/contacts', 'GET'),
+    files: path => call(`/files?path=${encodeURIComponent(path || '')}`, 'GET')
   }
 }
 
@@ -609,7 +619,27 @@ function SetupView({ api, onDone }) {
   })
 }
 
-function Tabs({ value, onChange }) {
+const ADHS_TABS = [
+  ['fokus', 'Fokus'],
+  ['tag', 'Tagesübersicht'],
+  ['fortschritt', 'Fortschritt'],
+  ['kalender', 'Kalender'],
+  ['notizen', 'Notizen'],
+  ['deck', 'Deck'],
+  ['kontakte', 'Kontakte'],
+  ['dateien', 'Dateien']
+]
+
+const PLAIN_TABS = [
+  ['kalender', 'Kalender'],
+  ['notizen', 'Notizen'],
+  ['deck', 'Deck'],
+  ['kontakte', 'Kontakte'],
+  ['dateien', 'Dateien']
+]
+
+function Tabs({ value, onChange, adhsMode, onToggleSettings, settingsOpen }) {
+  const entries = adhsMode ? ADHS_TABS : PLAIN_TABS
   const tab = (key, label) =>
     jsx('button', {
       type: 'button',
@@ -632,15 +662,65 @@ function Tabs({ value, onChange }) {
   return jsxs('div', {
     style: {
       display: 'flex',
+      alignItems: 'center',
       gap: '2px',
       padding: '8px 16px 0',
       borderBottom: '1px solid var(--ui-stroke-secondary)'
     },
     children: [
-      tab('fokus', 'Fokus'),
-      tab('tag', 'Tagesübersicht'),
-      tab('fortschritt', 'Fortschritt'),
-      tab('kalender', 'Kalender')
+      ...entries.map(([key, label]) => tab(key, label)),
+      jsx('div', { style: { flex: 1 } }),
+      jsx('button', {
+        type: 'button',
+        onClick: onToggleSettings,
+        title: 'Einstellungen',
+        style: {
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          padding: '6px 10px',
+          fontSize: '0.9rem',
+          color: settingsOpen ? 'var(--ui-accent)' : 'var(--ui-text-tertiary)'
+        },
+        children: '⚙'
+      })
+    ]
+  })
+}
+
+function SettingsPanel({ adhsMode, onChangeAdhsMode }) {
+  return jsxs('div', {
+    style: {
+      padding: '12px 16px',
+      borderBottom: '1px solid var(--ui-stroke-secondary)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px'
+    },
+    children: [
+      jsxs('label', {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          fontSize: '0.84rem',
+          color: 'var(--ui-text-primary)',
+          cursor: 'pointer'
+        },
+        children: [
+          jsx('input', {
+            type: 'checkbox',
+            checked: adhsMode,
+            onChange: event => onChangeAdhsMode(event.target.checked)
+          }),
+          'ADHS-Fokus-Modus'
+        ]
+      }),
+      jsx('div', {
+        style: { fontSize: '0.74rem', color: 'var(--ui-text-tertiary)' },
+        children:
+          'Fügt Fokus- und Fortschritts-Tab hinzu: eine Aufgabe statt Liste, Brain-Dump-Erfassung, Gamification. Ausgeschaltet bleibt es beim reinen Nextcloud-Überblick.'
+      })
     ]
   })
 }
@@ -2256,9 +2336,417 @@ function CalendarView({
   })
 }
 
+// ---------------------------------------------------------------- Notizen
+
+function NotesView({ api, setError }) {
+  const [notes, setNotes] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [unavailable, setUnavailable] = useState(false)
+  const [openId, setOpenId] = useState(null)
+  const [draftTitle, setDraftTitle] = useState('')
+  const [draftContent, setDraftContent] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [creating, setCreating] = useState(false)
+
+  const load = useCallback(() => {
+    setLoading(true)
+    return api
+      .notesList()
+      .then(data => {
+        setNotes((data && data.notes) || [])
+        setUnavailable(false)
+      })
+      .catch(error => {
+        if (describeError(error).includes('nicht installiert oder aktiviert')) setUnavailable(true)
+        else setError(describeError(error))
+      })
+      .then(() => setLoading(false), () => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const openNote = id => {
+    setCreating(false)
+    setBusy(true)
+    api
+      .noteGet(id)
+      .then(data => {
+        setOpenId(id)
+        setDraftTitle((data && data.title) || '')
+        setDraftContent((data && data.content) || '')
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setBusy(false), () => setBusy(false))
+  }
+
+  const startCreate = () => {
+    setCreating(true)
+    setOpenId(null)
+    setDraftTitle('')
+    setDraftContent('')
+  }
+
+  const save = () => {
+    if (busy) return
+    setBusy(true)
+    const done = creating
+      ? api.noteCreate(draftTitle || '(ohne Titel)', draftContent)
+      : api.noteUpdate(openId, { title: draftTitle, content: draftContent })
+    done
+      .then(() => {
+        setCreating(false)
+        setOpenId(null)
+        return load()
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setBusy(false), () => setBusy(false))
+  }
+
+  const remove = id => {
+    if (busy) return
+    setBusy(true)
+    api
+      .noteDelete(id)
+      .then(() => {
+        if (openId === id) setOpenId(null)
+        return load()
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setBusy(false), () => setBusy(false))
+  }
+
+  if (unavailable) {
+    return jsx('div', {
+      style: { padding: '32px 24px' },
+      children: jsx(EmptyState, {
+        title: 'Notizen sind hier nicht verfügbar.',
+        description: 'Die Notes-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.'
+      })
+    })
+  }
+
+  const editing = creating || openId !== null
+
+  return jsxs('div', {
+    style: { display: 'flex', height: '100%', minHeight: 0 },
+    children: [
+      jsxs('div', {
+        style: {
+          width: '260px',
+          flexShrink: 0,
+          borderRight: '1px solid var(--ui-stroke-secondary)',
+          display: 'flex',
+          flexDirection: 'column',
+          minHeight: 0
+        },
+        children: [
+          jsx('div', {
+            style: { padding: '10px 12px', borderBottom: '1px solid var(--ui-stroke-secondary)' },
+            children: jsx(Button, { onClick: startCreate, style: { width: '100%' }, children: '+ Notiz' })
+          }),
+          jsx('div', {
+            style: { flex: 1, minHeight: 0, overflowY: 'auto' },
+            children: loading
+              ? jsx('div', { style: { padding: '12px', color: 'var(--ui-text-tertiary)', fontSize: '0.8rem' }, children: 'Wird geladen…' })
+              : notes.length
+                ? notes.map(n =>
+                    jsxs('button', {
+                      type: 'button',
+                      onClick: () => openNote(n.id),
+                      style: {
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        font: 'inherit',
+                        background: openId === n.id ? 'var(--ui-bg-secondary)' : 'none',
+                        border: 'none',
+                        borderBottom: '1px solid var(--ui-stroke-secondary)',
+                        padding: '10px 12px',
+                        cursor: 'pointer'
+                      },
+                      children: [
+                        jsx('div', { style: { fontSize: '0.84rem', color: 'var(--ui-text-primary)' }, children: n.title }),
+                        n.preview
+                          ? jsx('div', { style: { fontSize: '0.72rem', color: 'var(--ui-text-tertiary)', marginTop: '2px' }, children: n.preview })
+                          : null
+                      ]
+                    }, n.id)
+                  )
+                : jsx('div', { style: { padding: '16px', color: 'var(--ui-text-tertiary)', fontSize: '0.8rem' }, children: 'Keine Notizen.' })
+          })
+        ]
+      }),
+      jsx('div', {
+        style: { flex: 1, minHeight: 0, padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' },
+        children: editing
+          ? [
+              jsx(Input, {
+                value: draftTitle,
+                placeholder: 'Titel',
+                onChange: event => setDraftTitle(event.target.value)
+              }),
+              jsx(Textarea, {
+                value: draftContent,
+                placeholder: 'Inhalt…',
+                rows: 16,
+                onChange: event => setDraftContent(event.target.value),
+                style: { flex: 1 }
+              }),
+              jsxs('div', {
+                style: { display: 'flex', gap: '8px' },
+                children: [
+                  jsx(Button, { onClick: save, disabled: busy, children: 'Speichern' }),
+                  openId !== null
+                    ? jsx(Button, { variant: 'ghost', onClick: () => remove(openId), disabled: busy, children: 'Löschen' })
+                    : null
+                ]
+              })
+            ]
+          : jsx(EmptyState, { title: 'Keine Notiz geöffnet.', description: 'Links eine Notiz auswählen oder eine neue anlegen.' })
+      })
+    ]
+  })
+}
+
+// ---------------------------------------------------------------- Deck (Kanban)
+
+function DeckView({ api, setError }) {
+  const [boards, setBoards] = useState([])
+  const [boardId, setBoardId] = useState(null)
+  const [stacks, setStacks] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [unavailable, setUnavailable] = useState(false)
+
+  useEffect(() => {
+    api
+      .deckBoards()
+      .then(data => {
+        const list = (data && data.boards) || []
+        setBoards(list)
+        setUnavailable(false)
+        if (list.length) setBoardId(list[0].id)
+      })
+      .catch(error => {
+        if (describeError(error).includes('nicht installiert oder aktiviert')) setUnavailable(true)
+        else setError(describeError(error))
+      })
+      .then(() => setLoading(false), () => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    if (boardId === null) return
+    api
+      .deckBoard(boardId)
+      .then(data => setStacks((data && data.stacks) || []))
+      .catch(error => setError(describeError(error)))
+  }, [boardId])
+
+  if (unavailable) {
+    return jsx('div', {
+      style: { padding: '32px 24px' },
+      children: jsx(EmptyState, {
+        title: 'Deck ist hier nicht verfügbar.',
+        description: 'Die Deck-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.'
+      })
+    })
+  }
+
+  if (loading) {
+    return jsx('div', { style: { padding: '24px', color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' }, children: 'Wird geladen…' })
+  }
+
+  if (!boards.length) {
+    return jsx('div', {
+      style: { padding: '32px 24px' },
+      children: jsx(EmptyState, { title: 'Keine Boards gefunden.', description: 'Lege in Nextcloud Deck ein Board an.' })
+    })
+  }
+
+  return jsxs('div', {
+    style: { padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px', height: '100%', minHeight: 0 },
+    children: [
+      boards.length > 1
+        ? jsxs('select', {
+            value: boardId || '',
+            onChange: event => setBoardId(Number(event.target.value)),
+            style: {
+              alignSelf: 'flex-start',
+              font: 'inherit',
+              fontSize: '0.82rem',
+              padding: '6px 10px',
+              borderRadius: '8px',
+              border: '1px solid var(--ui-stroke-secondary)',
+              background: 'var(--ui-bg-secondary)',
+              color: 'var(--ui-text-primary)'
+            },
+            children: boards.map(b => jsx('option', { value: b.id, children: b.title }, b.id))
+          })
+        : null,
+      jsx('div', {
+        style: { display: 'flex', gap: '12px', overflowX: 'auto', flex: 1, minHeight: 0 },
+        children: stacks.map(stack =>
+          jsxs('div', {
+            style: {
+              minWidth: '220px',
+              maxWidth: '220px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              border: '1px solid var(--ui-stroke-secondary)',
+              borderRadius: '10px',
+              padding: '10px'
+            },
+            children: [
+              jsx('div', { style: { fontWeight: 700, fontSize: '0.82rem', color: 'var(--ui-text-primary)' }, children: stack.title }),
+              ...stack.cards.map(card =>
+                jsx('div', {
+                  style: {
+                    border: '1px solid var(--ui-stroke-secondary)',
+                    borderRadius: '8px',
+                    padding: '8px 10px',
+                    fontSize: '0.8rem',
+                    color: 'var(--ui-text-secondary)',
+                    background: 'var(--ui-bg-secondary)'
+                  },
+                  children: card.title
+                }, card.id)
+              )
+            ]
+          }, stack.id)
+        )
+      })
+    ]
+  })
+}
+
+// ---------------------------------------------------------------- Kontakte
+
+function ContactsView({ api, setError }) {
+  const [contacts, setContacts] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [filter, setFilter] = useState('')
+
+  useEffect(() => {
+    api
+      .contacts()
+      .then(data => setContacts((data && data.contacts) || []))
+      .catch(error => setError(describeError(error)))
+      .then(() => setLoading(false), () => setLoading(false))
+  }, [])
+
+  const query = filter.trim().toLowerCase()
+  const shown = query
+    ? contacts.filter(c => c.name.toLowerCase().includes(query) || c.emails.some(e => e.toLowerCase().includes(query)))
+    : contacts
+
+  return jsxs('div', {
+    style: { padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' },
+    children: [
+      jsx(Input, { value: filter, placeholder: 'Suchen…', onChange: event => setFilter(event.target.value) }),
+      loading
+        ? jsx('div', { style: { color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' }, children: 'Wird geladen…' })
+        : shown.length
+          ? jsx('div', {
+              style: { display: 'flex', flexDirection: 'column', gap: '2px' },
+              children: shown.map((c, index) =>
+                jsxs(DayRow, {
+                  title: c.name || '(ohne Namen)',
+                  meta: [c.emails[0], c.tels[0]].filter(Boolean).join(' · '),
+                  action: null
+                }, `${index}-${c.name}`)
+              )
+            })
+          : jsx(EmptyState, { title: 'Keine Kontakte gefunden.', description: query ? 'Andere Suche versuchen.' : 'Das Adressbuch ist leer.' })
+    ]
+  })
+}
+
+// ---------------------------------------------------------------- Dateien
+
+function FilesView({ api, setError }) {
+  const [path, setPath] = useState('')
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+    api
+      .files(path)
+      .then(data => setItems((data && data.items) || []))
+      .catch(error => setError(describeError(error)))
+      .then(() => setLoading(false), () => setLoading(false))
+  }, [path])
+
+  const segments = path ? path.split('/').filter(Boolean) : []
+
+  return jsxs('div', {
+    style: { padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' },
+    children: [
+      jsxs('div', {
+        style: { display: 'flex', gap: '6px', flexWrap: 'wrap', fontSize: '0.8rem', color: 'var(--ui-text-tertiary)' },
+        children: [
+          jsx('button', {
+            type: 'button',
+            onClick: () => setPath(''),
+            style: { background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ui-accent)', font: 'inherit', padding: 0 },
+            children: 'Start'
+          }),
+          ...segments.map((seg, index) =>
+            jsxs('span', {
+              children: [
+                ' / ',
+                jsx('button', {
+                  type: 'button',
+                  onClick: () => setPath(segments.slice(0, index + 1).join('/')),
+                  style: { background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ui-accent)', font: 'inherit', padding: 0 },
+                  children: seg
+                })
+              ]
+            }, `${index}-${seg}`)
+          )
+        ]
+      }),
+      loading
+        ? jsx('div', { style: { color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' }, children: 'Wird geladen…' })
+        : items.length
+          ? jsx('div', {
+              style: { display: 'flex', flexDirection: 'column', gap: '2px' },
+              children: items.map(item =>
+                jsx(DayRow, {
+                  title: (item.isDirectory ? '📁 ' : '') + item.name,
+                  meta: item.isDirectory ? '' : item.size ? `${Math.round(item.size / 1024)} KB` : '',
+                  action: item.isDirectory
+                    ? jsx(Button, {
+                        variant: 'ghost',
+                        onClick: () => setPath(path ? `${path}/${item.name}` : item.name),
+                        children: 'Öffnen'
+                      })
+                    : null
+                }, item.name)
+              )
+            })
+          : jsx(EmptyState, { title: 'Ordner ist leer.', description: '' })
+    ]
+  })
+}
+
 function FokusPage({ ctx }) {
   const api = makeApi(ctx)
+  // Default AN: Oliver nutzt es gerade aktiv, niemand soll es ihm ungefragt
+  // wegnehmen. Wer es ausschaltet, bekommt ein reines Nextcloud-Dashboard.
+  const [adhsMode, setAdhsModeState] = useState(() => ctx.storage.get(STORAGE_ADHS_KEY, true))
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [tab, setTab] = useState(() => ctx.storage.get(STORAGE_TAB_KEY, 'fokus'))
+
+  const setAdhsMode = value => {
+    ctx.storage.set(STORAGE_ADHS_KEY, value)
+    setAdhsModeState(value)
+    // Faellt ein Tab weg, der gerade offen ist, landet man auf dem Kalender -
+    // der ist in beiden Modi vorhanden und der sinnvollste generische Start.
+    if (!value && (tab === 'fokus' || tab === 'fortschritt')) setTab('kalender')
+  }
   const [focus, setFocus] = useState({ task: null, inbox: 0 })
   const [day, setDay] = useState({ items: [], date: '' })
   const [dayLoading, setDayLoading] = useState(false)
@@ -2434,7 +2922,14 @@ function FokusPage({ ctx }) {
     style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
     children: [
       jsx(CaptureBar, { onCapture: capture, busy }),
-      jsx(Tabs, { value: tab, onChange: setTab }),
+      jsx(Tabs, {
+        value: tab,
+        onChange: setTab,
+        adhsMode,
+        onToggleSettings: () => setSettingsOpen(current => !current),
+        settingsOpen
+      }),
+      settingsOpen ? jsx(SettingsPanel, { adhsMode, onChangeAdhsMode: setAdhsMode }) : null,
       error
         ? jsx('div', {
             style: { padding: '12px 16px' },
@@ -2444,30 +2939,38 @@ function FokusPage({ ctx }) {
       jsx('div', {
         style: { flex: 1, minHeight: 0, overflowY: 'auto' },
         children:
-          tab === 'fokus'
+          tab === 'fokus' && adhsMode
             ? jsx(FokusView, { api, state: focus, reload, setError })
-            : tab === 'fortschritt'
+            : tab === 'fortschritt' && adhsMode
               ? jsx(ProgressView, { data: progress, loading: progressLoading })
-              : tab === 'kalender'
-                ? jsx(CalendarView, {
-                    api,
-                    month: calMonth,
-                    days: monthDays,
-                    loading: monthLoading,
-                    onMonth: setCalMonth,
-                    onRefresh: () => loadMonth(calMonth.year, calMonth.month),
-                    unscheduled,
-                    unscheduledLoading,
-                    onReloadUnscheduled: loadUnscheduled,
-                    calendarNames,
-                    weekStart,
-                    weekDays,
-                    weekLoading,
-                    onWeekStart: setWeekStart,
-                    onReloadWeek: () => loadWeek(weekStart),
-                    setError
-                  })
-                : jsx(TagView, { items: day.items || [], date: day.date, loading: dayLoading })
+              : tab === 'tag' && adhsMode
+                ? jsx(TagView, { items: day.items || [], date: day.date, loading: dayLoading })
+                : tab === 'notizen'
+                  ? jsx(NotesView, { api, setError })
+                  : tab === 'deck'
+                    ? jsx(DeckView, { api, setError })
+                    : tab === 'kontakte'
+                      ? jsx(ContactsView, { api, setError })
+                      : tab === 'dateien'
+                        ? jsx(FilesView, { api, setError })
+                        : jsx(CalendarView, {
+                            api,
+                            month: calMonth,
+                            days: monthDays,
+                            loading: monthLoading,
+                            onMonth: setCalMonth,
+                            onRefresh: () => loadMonth(calMonth.year, calMonth.month),
+                            unscheduled,
+                            unscheduledLoading,
+                            onReloadUnscheduled: loadUnscheduled,
+                            calendarNames,
+                            weekStart,
+                            weekDays,
+                            weekLoading,
+                            onWeekStart: setWeekStart,
+                            onReloadWeek: () => loadWeek(weekStart),
+                            setError
+                          })
       })
     ]
   })

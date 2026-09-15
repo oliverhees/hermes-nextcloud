@@ -16,14 +16,20 @@ caldav-Bibliothek, installiert dieses Modul sie beim ersten Laden selbst nach
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +239,19 @@ def _dav_url(host: str) -> str:
     return value
 
 
+def _base_url(host: str) -> str:
+    """Reiner Host ohne /remote.php/dav-Anhang - Notes/Deck/CardDAV/WebDAV-
+    Dateien haben andere URL-Wurzeln als CalDAV, brauchen aber dieselben
+    Zugangsdaten wie _dav_url()."""
+    value = host.strip().rstrip("/")
+    if not value:
+        raise HTTPException(status_code=400, detail=SETUP_HINT)
+    if "://" not in value:
+        value = f"https://{value}"
+    value = value.split("/remote.php")[0].split("/index.php")[0]
+    return value.rstrip("/")
+
+
 def _config() -> dict:
     block = _read_config_block()
     host = str(block.get("host") or block.get("url") or "").strip()
@@ -257,6 +276,7 @@ def _config() -> dict:
     )
     return {
         "url": _dav_url(host),
+        "base_url": _base_url(host),
         "username": username,
         "password": password,
         "calendar_name": str(block.get("calendar_name") or DEFAULT_CALENDAR).strip()
@@ -1012,6 +1032,151 @@ def _parse_moment(raw: str, all_day: bool) -> dt.date | dt.datetime:
     return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
 
 
+# ---------------------------------------------------------------- Nextcloud-HTTP
+#
+# Alles ausser CalDAV (Notizen, Deck, Kontakte, Dateien) laeuft ueber denselben
+# authentifizierten Request-Helfer statt einer eigenen Bibliothek pro App -
+# das sind reine REST/WebDAV-Aufrufe, dafuer reicht die Standardbibliothek.
+
+
+def _nc_request(
+    method: str,
+    path: str,
+    cfg: dict,
+    *,
+    headers: dict | None = None,
+    body: bytes | None = None,
+    timeout: int = 15,
+) -> tuple[int, bytes]:
+    """Ein authentifizierter HTTP-Request gegen Nextcloud - Basic Auth mit
+    demselben App-Passwort, das schon fuer CalDAV gilt. Liefert (Status, Body)
+    statt zu werfen, auch bei 4xx/5xx - die Aufrufer entscheiden pro Route,
+    was ein 404 bedeutet (App nicht installiert vs. Objekt nicht gefunden)."""
+    url = f"{cfg['base_url']}{path}"
+    token = base64.b64encode(f"{cfg['username']}:{cfg['password']}".encode("utf-8")).decode(
+        "ascii"
+    )
+    req_headers = {"Authorization": f"Basic {token}"}
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Nextcloud nicht erreichbar: {exc}"
+        ) from exc
+
+
+# ---------------------------------------------------------------- Notizen
+
+NOTES_BASE = "/index.php/apps/notes/api/v1/notes"
+
+
+def _notes_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail="Die Notes-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.",
+    )
+
+
+def _notes_json(status: int, body: bytes, *, context: str) -> Any:
+    if status == 404:
+        raise _notes_unavailable()
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"{context} (Status {status}).")
+    try:
+        return json.loads(body)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"{context}: Antwort nicht lesbar ({exc})."
+        ) from exc
+
+
+# ---------------------------------------------------------------- Deck (Kanban)
+#
+# Read-only in v1 - Karten verschieben/anlegen braucht zusaetzliche
+# Board-Berechtigungspruefung, die den Rahmen dieses Baus sprengt.
+
+DECK_BASE = "/index.php/apps/deck/api/v1.0"
+
+
+def _deck_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail="Die Deck-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.",
+    )
+
+
+# ---------------------------------------------------------------- Kontakte
+
+_VCARD_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)(;[^:]*)?:(.*)$")
+
+
+def _parse_vcard(text: str) -> dict:
+    """Minimaler zeilenbasierter vCard-Parser - nur FN/EMAIL/TEL fuer die
+    Listenansicht, kein Anspruch auf Vollstaendigkeit (Faltung ueber mehrere
+    Zeilen und Base64-Fotos werden bewusst ignoriert, v1 ist reines Lesen)."""
+    name = ""
+    emails: list[str] = []
+    tels: list[str] = []
+    for raw_line in text.replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line or line.startswith(" "):
+            continue
+        match = _VCARD_LINE.match(line)
+        if not match:
+            continue
+        key = match.group(1).upper()
+        value = match.group(3).strip()
+        if key == "FN" and value:
+            name = value
+        elif key == "EMAIL" and value:
+            emails.append(value)
+        elif key == "TEL" and value:
+            tels.append(value)
+    return {"name": name, "emails": emails, "tels": tels}
+
+
+# ---------------------------------------------------------------- Dateien
+
+
+def _parse_propfind_files(xml_bytes: bytes, base_path: str) -> list[dict]:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Dateien-Antwort nicht lesbar: {exc}"
+        ) from exc
+    ns = {"d": "DAV:"}
+    items = []
+    for resp in root.findall("d:response", ns):
+        href = resp.findtext("d:href", default="", namespaces=ns)
+        if not href or href.rstrip("/") == base_path.rstrip("/"):
+            continue  # das abgefragte Verzeichnis selbst ueberspringen
+        propstat = resp.find("d:propstat", ns)
+        prop = propstat.find("d:prop", ns) if propstat is not None else None
+        if prop is None:
+            continue
+        is_dir = prop.find("d:resourcetype/d:collection", ns) is not None
+        name = urllib.parse.unquote(href.rstrip("/").rsplit("/", 1)[-1])
+        size_el = prop.find("d:getcontentlength", ns)
+        modified_el = prop.find("d:getlastmodified", ns)
+        items.append(
+            {
+                "name": name,
+                "isDirectory": is_dir,
+                "size": int(size_el.text) if size_el is not None and size_el.text else None,
+                "modified": modified_el.text if modified_el is not None else None,
+            }
+        )
+    items.sort(key=lambda i: (not i["isDirectory"], i["name"].lower()))
+    return items
+
+
 # ---------------------------------------------------------------- Routen
 
 
@@ -1631,3 +1796,222 @@ async def reminder_check(body: dict) -> dict:
         _mutate_enrichment(lambda s: s.__setitem__("lastReminderAt", now.isoformat()))
 
     return {"remind": bool(due), "task": ready[0], "inbox": len(ready)}
+
+
+# ---------------------------------------------------------------- Notizen-Routen
+
+
+@router.get("/notes")
+async def list_notes() -> dict:
+    cfg = _config()
+    status, body = _nc_request("GET", NOTES_BASE, cfg, headers={"Accept": "application/json"})
+    items = _notes_json(status, body, context="Notizen nicht abrufbar")
+    items = items if isinstance(items, list) else []
+    items.sort(key=lambda n: n.get("modified") or 0, reverse=True)
+    result = []
+    for n in items:
+        content = str(n.get("content") or "").strip()
+        preview = content.splitlines()[0][:160] if content else ""
+        result.append(
+            {
+                "id": n.get("id"),
+                "title": n.get("title") or "(ohne Titel)",
+                "preview": preview,
+                "modified": n.get("modified"),
+                "favorite": bool(n.get("favorite")),
+            }
+        )
+    return {"notes": result}
+
+
+@router.get("/notes/{note_id}")
+async def get_note(note_id: int) -> dict:
+    cfg = _config()
+    status, body = _nc_request(
+        "GET", f"{NOTES_BASE}/{note_id}", cfg, headers={"Accept": "application/json"}
+    )
+    if status == 404:
+        raise HTTPException(status_code=404, detail="Notiz existiert nicht (mehr).")
+    n = _notes_json(status, body, context="Notiz nicht abrufbar")
+    return {"id": n.get("id"), "title": n.get("title") or "", "content": n.get("content") or ""}
+
+
+@router.post("/notes")
+async def create_note(body: dict) -> dict:
+    cfg = _config()
+    title = _body_str(body, "title")
+    content = str((body or {}).get("content") or "")
+    payload = json.dumps({"title": title, "content": content}).encode("utf-8")
+    status, resp_body = _nc_request(
+        "POST",
+        NOTES_BASE,
+        cfg,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        body=payload,
+    )
+    n = _notes_json(status, resp_body, context="Notiz nicht anlegbar")
+    return {"ok": True, "note": {"id": n.get("id"), "title": n.get("title") or title}}
+
+
+@router.put("/notes/{note_id}")
+async def update_note(note_id: int, body: dict) -> dict:
+    cfg = _config()
+    payload: dict[str, str] = {}
+    if isinstance(body, dict) and "title" in body:
+        payload["title"] = str(body.get("title") or "")
+    if isinstance(body, dict) and "content" in body:
+        payload["content"] = str(body.get("content") or "")
+    if not payload:
+        raise HTTPException(status_code=422, detail="Weder 'title' noch 'content' angegeben.")
+    status, resp_body = _nc_request(
+        "PUT",
+        f"{NOTES_BASE}/{note_id}",
+        cfg,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        body=json.dumps(payload).encode("utf-8"),
+    )
+    if status == 404:
+        raise HTTPException(status_code=404, detail="Notiz existiert nicht (mehr).")
+    _notes_json(status, resp_body, context="Notiz nicht speicherbar")
+    return {"ok": True}
+
+
+@router.delete("/notes/{note_id}")
+async def delete_note(note_id: int) -> dict:
+    cfg = _config()
+    status, _resp_body = _nc_request("DELETE", f"{NOTES_BASE}/{note_id}", cfg)
+    if status == 404:
+        raise HTTPException(status_code=404, detail="Notiz existiert nicht (mehr).")
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Notiz nicht loeschbar (Status {status}).")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Deck-Routen
+
+
+@router.get("/deck/boards")
+async def list_boards() -> dict:
+    cfg = _config()
+    status, body = _nc_request(
+        "GET",
+        f"{DECK_BASE}/boards",
+        cfg,
+        headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+    )
+    if status == 404:
+        raise _deck_unavailable()
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Boards nicht abrufbar (Status {status}).")
+    try:
+        boards = json.loads(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Boards-Antwort nicht lesbar: {exc}") from exc
+    boards = boards if isinstance(boards, list) else []
+    return {
+        "boards": [
+            {"id": b.get("id"), "title": b.get("title"), "color": b.get("color")}
+            for b in boards
+            if not b.get("deletedAt")
+        ]
+    }
+
+
+@router.get("/deck/boards/{board_id}")
+async def get_board(board_id: int) -> dict:
+    cfg = _config()
+    status, body = _nc_request(
+        "GET",
+        f"{DECK_BASE}/boards/{board_id}/stacks",
+        cfg,
+        headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+    )
+    if status == 404:
+        raise _deck_unavailable()
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Board nicht abrufbar (Status {status}).")
+    try:
+        stacks = json.loads(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Board-Antwort nicht lesbar: {exc}") from exc
+    stacks = stacks if isinstance(stacks, list) else []
+    stacks.sort(key=lambda s: s.get("order") or 0)
+    return {
+        "stacks": [
+            {
+                "id": s.get("id"),
+                "title": s.get("title"),
+                "cards": [
+                    {
+                        "id": c.get("id"),
+                        "title": c.get("title"),
+                        "duedate": c.get("duedate"),
+                    }
+                    for c in (s.get("cards") or [])
+                ],
+            }
+            for s in stacks
+        ]
+    }
+
+
+# ---------------------------------------------------------------- Kontakte-Route
+
+
+@router.get("/contacts")
+async def list_contacts() -> dict:
+    cfg = _config()
+    addressbook_path = f"/remote.php/dav/addressbooks/users/{cfg['username']}/contacts/"
+    body = (
+        '<?xml version="1.0" encoding="utf-8" ?>'
+        '<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">'
+        "<d:prop><card:address-data/></d:prop></card:addressbook-query>"
+    ).encode("utf-8")
+    status, resp = _nc_request(
+        "REPORT",
+        addressbook_path,
+        cfg,
+        headers={"Depth": "1", "Content-Type": "application/xml"},
+        body=body,
+    )
+    if status == 404:
+        raise HTTPException(
+            status_code=503, detail="Kein Adressbuch 'contacts' auf dieser Nextcloud gefunden."
+        )
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Kontakte nicht abrufbar (Status {status}).")
+    try:
+        root = ET.fromstring(resp)
+    except ET.ParseError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Kontakte-Antwort nicht lesbar: {exc}"
+        ) from exc
+    ns = {"d": "DAV:", "card": "urn:ietf:params:xml:ns:carddav"}
+    contacts = []
+    for el in root.findall(".//card:address-data", ns):
+        if not el.text:
+            continue
+        parsed = _parse_vcard(el.text)
+        if parsed["name"] or parsed["emails"]:
+            contacts.append(parsed)
+    contacts.sort(key=lambda c: c["name"].lower())
+    return {"contacts": contacts}
+
+
+# ---------------------------------------------------------------- Dateien-Route
+
+
+@router.get("/files")
+async def list_files(path: str = "") -> dict:
+    cfg = _config()
+    clean_path = path.strip("/")
+    if ".." in clean_path.split("/"):
+        raise HTTPException(status_code=422, detail="Pfad darf kein '..' enthalten.")
+    dav_path = f"/remote.php/dav/files/{cfg['username']}/{clean_path}".rstrip("/") + "/"
+    status, body = _nc_request("PROPFIND", dav_path, cfg, headers={"Depth": "1"})
+    if status == 404:
+        raise HTTPException(status_code=404, detail=f"Pfad '{clean_path or '/'}' existiert nicht.")
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Dateien nicht abrufbar (Status {status}).")
+    items = _parse_propfind_files(body, dav_path)
+    return {"path": clean_path, "items": items}

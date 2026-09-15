@@ -11,6 +11,17 @@ und ohne Mahnton, dazu Gamification (XP, Level, Streaks, Erfolge). Wer den
 großen Überblick will, öffnet den Kalender-Tab: Monatsraster, Wochenansicht
 mit Stundenraster, „Ungeplante Aufgaben"-Seitenpanel.
 
+**ADHS-Modus ist per `⚙`-Schalter in der Tab-Leiste abschaltbar** (Standard: an).
+Ausgeschaltet verschwinden die Tabs "Fokus" und "Fortschritt", Startansicht
+wird "Kalender" — die Capture-Leiste (Brain-Dump) bleibt in jedem Modus da,
+das ist generisch nützliche Schnellerfassung, kein ADHS-exklusives Feature.
+
+Dazu vier weitere Nextcloud-Bereiche als eigene Tabs: **Notizen**, **Deck**
+(Kanban, read-only in v1), **Kontakte**, **Dateien** — auf Olivers Instanz
+sind aktuell nur Kontakte und Dateien tatsächlich installiert; Notizen/Deck
+zeigen einen ruhigen "App nicht verfügbar"-Hinweis statt eines Fehlers, sobald
+die jeweilige Nextcloud-App fehlt.
+
 Nextcloud (CalDAV) ist die alleinige Wahrheit für Titel, Termin und Status. Das
 Plugin legt daneben nur ADHS-Zusatzdaten ab: Fokus-Reihenfolge, Teilschritte,
 Snooze-Zeitpunkte, Fortschritt (XP, Level, Streak, Erfolge).
@@ -101,6 +112,25 @@ Snooze heißt „jetzt nicht vor die Nase", nicht „aus dem Kalender streichen"
 Wochenraster nicht auf — sie haben keinen Tag, an den sie gehören, und leben
 im Fokus-Eingang bzw. im „Ungeplante Aufgaben"-Panel. Erst das Ziehen auf
 einen Tag gibt ihnen eine Fälligkeit.
+
+## Weitere Nextcloud-Bereiche
+
+| Route | Zweck |
+|---|---|
+| `GET /notes` | Notizenliste (Titel, Vorschau, Änderungsdatum) |
+| `GET /notes/{id}` | eine Notiz mit vollem Inhalt |
+| `POST /notes` | neue Notiz anlegen |
+| `PUT /notes/{id}` | Titel/Inhalt ändern |
+| `DELETE /notes/{id}` | Notiz löschen |
+| `GET /deck/boards` | Deck-Boards auflisten |
+| `GET /deck/boards/{id}` | Stacks + Karten eines Boards (read-only in v1) |
+| `GET /contacts` | Kontakte aus dem CardDAV-Adressbuch `contacts` (read-only) |
+| `GET /files?path=` | WebDAV-Verzeichnisinhalt (read-only, kein Download in v1) |
+
+Notizen und Deck brauchen die jeweilige Nextcloud-App; ist sie nicht
+installiert, zeigt der Tab einen ruhigen Hinweis statt eines Fehlers. Kontakte
+und Dateien brauchen nur CardDAV/WebDAV, die auf jeder Standard-Nextcloud-
+Instanz mitlaufen.
 
 ## Installation
 
