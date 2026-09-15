@@ -80,33 +80,62 @@ HERMES_HOME = hermes_home()
 CONFIG_FILE = HERMES_HOME / "config.yaml"
 STATE_DIR = HERMES_HOME / PLUGIN_ID
 ENRICHMENT_FILE = STATE_DIR / "enrichment.json"
+CREDENTIALS_FILE = STATE_DIR / "credentials.json"
 
 _state_lock = threading.Lock()
 
 SETUP_HINT = (
-    "Nextcloud noch nicht konfiguriert. Trage in "
-    f"{CONFIG_FILE} einen Block 'plugins.{PLUGIN_ID}' mit host, username und "
-    "app_password ein - die Anleitung steht in der README des Plugins."
+    "Nextcloud noch nicht verbunden. Oeffne den Fokus-Tab in Hermes Desktop - "
+    "dort fragt ein Einrichtungs-Formular Host, Benutzername und App-Passwort ab "
+    "(Anleitung in der README des Plugins)."
 )
 
 
 # ---------------------------------------------------------------- Konfiguration
+#
+# Zwei Quellen, in dieser Reihenfolge:
+#   1. credentials.json (dieser Ordner) - vom Einrichtungs-Formular im Plugin
+#      selbst geschrieben, chmod 600, ausserhalb von Hermes' eigener config.yaml.
+#      Das ist der dokumentierte Weg: niemand soll von Hand YAML editieren.
+#   2. plugins.hermes-fokus / plugins.entries.hermes-fokus in config.yaml - ein
+#      Fallback fuer Leute, die das lieber deklarativ pflegen. Beide Stellen,
+#      weil Hermes seine config.yaml beim Speichern neu schreibt und dabei
+#      unbekannte Schluessel unter 'plugins' verlieren kann.
 
 
-def _read_config_block() -> dict:
-    """Liest den Plugin-Block aus Hermes' config.yaml.
+def _read_credentials_file() -> dict:
+    try:
+        raw = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
 
-    Zwei akzeptierte Stellen, weil Hermes seine config.yaml beim Speichern neu
-    schreibt und dabei unbekannte Top-Level-Schluessel unter 'plugins' verlieren
-    kann: 'plugins.hermes-fokus' (dokumentierter Weg) und
-    'plugins.entries.hermes-fokus' (die Stelle, an der Hermes selbst bereits
-    plugin-eigene Einstellungen fuehrt und die ein Rewrite ueberlebt).
-    """
+
+def _write_credentials_file(data: dict) -> None:
+    """Wie _write_enrichment: erst daneben schreiben, dann umbenennen - und
+    zusaetzlich auf 0600, weil hier ein Klartext-App-Passwort drinsteht."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".credentials.", dir=str(STATE_DIR))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CREDENTIALS_FILE)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def _read_config_yaml_block() -> dict:
+    """Fallback-Pfad: manuell in config.yaml gepflegt. Wird nur noch
+    angefasst, wenn credentials.json leer ist."""
     if _yaml is None:
-        raise HTTPException(
-            status_code=503,
-            detail=f"PyYAML ist in dieser Hermes-Umgebung nicht verfuegbar ({_YAML_ERROR}).",
-        )
+        raise HTTPException(status_code=400, detail=SETUP_HINT)
     try:
         raw = _yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8")) or {}
     except FileNotFoundError:
@@ -127,6 +156,23 @@ def _read_config_block() -> dict:
     if not isinstance(block, dict):
         raise HTTPException(status_code=400, detail=SETUP_HINT)
     return block
+
+
+def _read_config_block() -> dict:
+    creds = _read_credentials_file()
+    if creds.get("host") and creds.get("username") and (
+        creds.get("app_password") or creds.get("password")
+    ):
+        return creds
+    return _read_config_yaml_block()
+
+
+def _is_configured() -> bool:
+    try:
+        _read_config_block()
+    except HTTPException:
+        return False
+    return True
 
 
 def _dav_url(host: str) -> str:
@@ -464,9 +510,15 @@ async def status() -> dict:
     try:
         cfg = _config()
     except HTTPException as exc:
-        return {"ready": False, "reason": exc.detail, "caldav": _caldav is not None}
+        return {
+            "ready": False,
+            "configured": _is_configured(),
+            "reason": exc.detail,
+            "caldav": _caldav is not None,
+        }
     return {
         "ready": _caldav is not None,
+        "configured": True,
         "reason": ""
         if _caldav is not None
         else f"Die Python-Bibliothek 'caldav' fehlt ({_CALDAV_ERROR}).",
@@ -474,6 +526,77 @@ async def status() -> dict:
         "calendar": cfg["calendar_name"],
         "host": cfg["url"],
     }
+
+
+@router.get("/settings")
+async def get_settings() -> dict:
+    """Liefert den aktuellen Verbindungsstand fuers Einrichtungs-Formular -
+    NIE das Passwort, auch nicht an das eigene Plugin-UI."""
+    creds = _read_credentials_file()
+    if creds.get("host") and creds.get("username"):
+        return {
+            "configured": True,
+            "source": "form",
+            "host": creds.get("host", ""),
+            "username": creds.get("username", ""),
+            "calendarName": creds.get("calendar_name") or DEFAULT_CALENDAR,
+        }
+    try:
+        block = _read_config_yaml_block()
+    except HTTPException:
+        return {"configured": False, "source": None, "host": "", "username": "", "calendarName": DEFAULT_CALENDAR}
+    host_value = str(block.get("host") or block.get("url") or "")
+    return {
+        "configured": bool(host_value),
+        "source": "config.yaml" if host_value else None,
+        "host": host_value,
+        "username": str(block.get("username") or block.get("user") or ""),
+        "calendarName": str(block.get("calendar_name") or DEFAULT_CALENDAR),
+    }
+
+
+@router.post("/settings")
+async def save_settings(body: dict) -> dict:
+    """Speichert Nextcloud-Zugangsdaten NUR nach einem erfolgreichen
+    Verbindungstest - ein gespeichertes, aber falsches Passwort waere
+    schlimmer als gar keine Config, weil der Fehler dann erst beim naechsten
+    Fokus-Abruf auftaucht statt sofort im Formular."""
+    host_value = _body_str(body, "host")
+    username = _body_str(body, "username")
+    password = _body_str(body, "appPassword")
+    calendar_name = (
+        str((body or {}).get("calendarName") or DEFAULT_CALENDAR).strip()
+        or DEFAULT_CALENDAR
+    )
+    url = _dav_url(host_value)
+
+    if _caldav is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Die Python-Bibliothek 'caldav' fehlt in dieser Hermes-Umgebung "
+                f"({_CALDAV_ERROR}). Installiere sie in Hermes' venv, z. B.: "
+                "~/.hermes/hermes-agent/venv/bin/pip install caldav"
+            ),
+        )
+    try:
+        client = _caldav.DAVClient(url=url, username=username, password=password)
+        client.principal()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Verbindung fehlgeschlagen - Host, Benutzername oder App-Passwort pruefen: {exc}",
+        ) from exc
+
+    _write_credentials_file(
+        {
+            "host": host_value,
+            "username": username,
+            "app_password": password,
+            "calendar_name": calendar_name,
+        }
+    )
+    return {"ok": True}
 
 
 @router.post("/capture")

@@ -29,6 +29,8 @@ Desktop-Hälfte wird über `desktop/plugin.js` geladen.
 | Route | Zweck |
 |---|---|
 | `GET /status` | Ist Nextcloud konfiguriert und `caldav` installiert? |
+| `GET /settings` | aktueller Verbindungsstand fürs Einrichtungs-Formular (nie das Passwort) |
+| `POST /settings` | Zugangsdaten testen und **nur bei Erfolg** speichern |
 | `POST /capture` | Brain-Dump-Text → neues VTODO |
 | `GET /focus` | nächste offene Aufgabe nach Fokus-Reihenfolge |
 | `POST /focus/complete` | VTODO auf COMPLETED |
@@ -47,7 +49,7 @@ Danach Hermes Desktop **komplett** neu starten (nicht nur das Fenster neu
 laden) und in **Capabilities → Plugins** den Eintrag „Fokus" einschalten. Wird
 nur `desktop/plugin.js` geändert, reicht ⌘K → **Reload desktop plugins**.
 
-## Die Zwei-Minuten-Schritte für Oliver
+## Einrichtung
 
 ### 1. `caldav` in Hermes' venv installieren
 
@@ -65,30 +67,32 @@ In Nextcloud unter **Einstellungen → Sicherheit → App-Passwort erstellen** e
 neues Passwort mit dem Namen `hermes-fokus` anlegen. Ein eigenes, nur für dieses
 Plugin — nicht das aus einem anderen Tool wiederverwenden.
 
-Das Passwort wird **nirgendwo** in diesem Repo abgelegt, sondern ausschließlich
-in `~/.hermes/config.yaml`.
+### 3. Im Plugin selbst verbinden
 
-### 3. Zugang in `~/.hermes/config.yaml` eintragen
+Kein Config-File von Hand editieren. Sobald „Fokus" in der Seitenleiste
+geöffnet wird und noch nichts eingerichtet ist, erscheint ein
+Einrichtungs-Formular: Host, Benutzername, App-Passwort eintragen, **Verbinden**
+klicken. Das Backend testet die Verbindung sofort gegen Nextcloud — gespeichert
+wird nur, wenn der Test klappt, sonst steht der Fehler direkt im Formular.
 
-Unter den bestehenden `plugins:`-Block, auf derselben Ebene wie `enabled:`:
+Die Zugangsdaten landen danach in
+`$HERMES_HOME/hermes-fokus/credentials.json` (Datei-Rechte `600`, nur der
+eigene Unix-User kann sie lesen) — **nicht** in `~/.hermes/config.yaml`. Das
+Plugin verwaltet diese Datei selbst; von Hand muss darin nichts geändert
+werden.
 
-```yaml
-plugins:
-  enabled:
-    - hermes-fokus        # <- ohne diesen Eintrag wird plugin_api.py nie importiert
-  hermes-fokus:
-    host: cloud.example.org       # dein Nextcloud-Host (mit oder ohne https://)
-    username: DEIN_NEXTCLOUD_USER
-    app_password: HIER_DAS_APP_PASSWORT_AUS_SCHRITT_2
-    # optional:
-    # calendar_name: Fokus-Aufgaben     # Standard; wird beim ersten Start angelegt
-    # read_calendars: [Persönlich]      # nur diese Kalender für Termine lesen
-```
+<details>
+<summary>Alternative: manuell in config.yaml (fortgeschritten, optional)</summary>
 
-Hermes schreibt seine `config.yaml` beim Speichern neu und kann dabei unbekannte
-Schlüssel verlieren. Falls der Block nach einem Hermes-Neustart verschwunden
-ist, trage ihn stattdessen unter `plugins.entries.hermes-fokus` ein — das
-Backend liest beide Stellen.
+Wer YAML von Hand pflegen möchte, kann statt des Formulars auch einen Block
+unter `plugins.hermes-fokus` bzw. `plugins.entries.hermes-fokus` in
+`~/.hermes/config.yaml` eintragen (Felder `host`, `username`, `app_password`,
+optional `calendar_name`, `read_calendars`). Das Backend prüft zuerst
+`credentials.json` und fällt nur auf diesen Block zurück, wenn die Datei
+leer ist. Für die meisten reicht das Formular — dieser Weg existiert nur,
+weil manche Setups (Remote-Profile, Scripting) lieber deklarativ bleiben.
+
+</details>
 
 ### 4. Plugin-Anzeigename bestätigen
 
@@ -107,6 +111,8 @@ an.
 ## Datenablage
 
 - **Nextcloud**: Aufgaben (VTODO im Kalender `Fokus-Aufgaben`), Termine (nur gelesen)
+- **`$HERMES_HOME/hermes-fokus/credentials.json`** (chmod 600): Nextcloud-Host,
+  Benutzername, App-Passwort — vom Einrichtungs-Formular geschrieben
 - **`$HERMES_HOME/hermes-fokus/enrichment.json`**: Fokus-Reihenfolge,
   Teilschritte, Snooze — UID-verschlüsselt, ohne Kopie von Titel oder Status
 - **`ctx.storage`** (`hermes.plugin.hermes-fokus.*`): zuletzt gewählter Tab,

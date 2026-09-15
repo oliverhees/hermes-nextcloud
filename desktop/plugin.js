@@ -61,6 +61,9 @@ function makeApi(ctx) {
   }
   return {
     status: () => call('/status', 'GET'),
+    getSettings: () => call('/settings', 'GET'),
+    saveSettings: (host, username, appPassword, calendarName) =>
+      call('/settings', 'POST', { host, username, appPassword, calendarName }),
     capture: title => call('/capture', 'POST', { title }),
     focus: () => call('/focus', 'GET'),
     complete: uid => call('/focus/complete', 'POST', { uid }),
@@ -162,6 +165,104 @@ function CaptureBar({ onCapture, busy }) {
         onClick: submit,
         disabled: busy || !text.trim(),
         children: 'Erfassen'
+      })
+    ]
+  })
+}
+
+function SetupView({ api, onDone }) {
+  const [host, setHost] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const hostRef = useRef(null)
+
+  // Kein Zwang, dem Kalender hinterherzuklicken: Fokus liegt sofort im ersten
+  // Feld, genau wie in der Capture-Bar (ISC-21-Prinzip auch hier).
+  useEffect(() => {
+    const node = hostRef.current
+    if (node && typeof node.focus === 'function') node.focus()
+  }, [])
+
+  const submit = () => {
+    if (busy) return
+    const h = host.trim()
+    const u = username.trim()
+    const p = password.trim()
+    if (!h || !u || !p) {
+      setError('Host, Benutzername und App-Passwort werden gebraucht.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    api
+      .saveSettings(h, u, p)
+      .then(() => {
+        setPassword('')
+        onDone()
+      })
+      .catch(err => setError(describeError(err)))
+      .then(() => setBusy(false), () => setBusy(false))
+  }
+
+  const onEnter = event => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      submit()
+    }
+  }
+
+  return jsxs('div', {
+    style: {
+      maxWidth: '380px',
+      margin: '0 auto',
+      padding: '32px 24px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '14px'
+    },
+    children: [
+      jsx('div', {
+        style: { fontSize: '1.05rem', fontWeight: 700, color: 'var(--ui-text-primary)' },
+        children: 'Mit Nextcloud verbinden'
+      }),
+      jsx('div', {
+        style: { fontSize: '0.8rem', color: 'var(--ui-text-tertiary)', lineHeight: 1.5 },
+        children:
+          'Nextcloud bleibt die alleinige Wahrheit für Aufgaben und Termine. Die Zugangsdaten landen lokal in einer eigenen Datei — niemals in Hermes’ eigener config.yaml.'
+      }),
+      jsx(Input, {
+        ref: hostRef,
+        autoFocus: true,
+        value: host,
+        placeholder: 'Nextcloud-Host, z. B. cloud.deine-domain.de',
+        onChange: event => setHost(event.target.value),
+        onKeyDown: onEnter
+      }),
+      jsx(Input, {
+        value: username,
+        placeholder: 'Nextcloud-Benutzername',
+        onChange: event => setUsername(event.target.value),
+        onKeyDown: onEnter
+      }),
+      jsx(Input, {
+        type: 'password',
+        value: password,
+        placeholder: 'App-Passwort (nicht dein normales Passwort)',
+        onChange: event => setPassword(event.target.value),
+        onKeyDown: onEnter
+      }),
+      error ? jsx(Notice, { tone: 'quiet', children: error }) : null,
+      jsx(Button, {
+        onClick: submit,
+        disabled: busy,
+        children: busy ? 'Verbinde…' : 'Verbinden'
+      }),
+      jsx('div', {
+        style: { fontSize: '0.72rem', color: 'var(--ui-text-quaternary)' },
+        children:
+          'App-Passwort erzeugen: Nextcloud → Einstellungen → Sicherheit → Neues App-Passwort. Wird sofort getestet, bevor irgendetwas gespeichert wird.'
       })
     ]
   })
@@ -461,6 +562,20 @@ function FokusPage({ ctx }) {
   const [dayLoading, setDayLoading] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  // null = wird gerade geprueft; erst danach entscheidet sich, ob das
+  // Einrichtungs-Formular oder die eigentliche Ansicht erscheint.
+  const [configured, setConfigured] = useState(null)
+
+  const checkSetup = useCallback(() => {
+    return api
+      .getSettings()
+      .then(data => setConfigured(Boolean(data && data.configured)))
+      .catch(() => setConfigured(false))
+  }, [])
+
+  useEffect(() => {
+    void checkSetup()
+  }, [checkSetup])
 
   const loadFocus = useCallback(() => {
     return api
@@ -491,13 +606,14 @@ function FokusPage({ ctx }) {
   }, [])
 
   useEffect(() => {
-    void loadFocus()
-  }, [loadFocus])
+    if (configured) void loadFocus()
+  }, [configured, loadFocus])
 
   useEffect(() => {
+    if (!configured) return
     ctx.storage.set(STORAGE_TAB_KEY, tab)
     if (tab === 'tag') void loadDay()
-  }, [tab, loadDay])
+  }, [configured, tab, loadDay])
 
   const capture = value => {
     setBusy(true)
@@ -513,6 +629,20 @@ function FokusPage({ ctx }) {
   }
 
   const reload = () => loadFocus().then(() => (tab === 'tag' ? loadDay() : undefined))
+
+  if (configured === null) {
+    return jsx('div', {
+      style: { padding: '24px', color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' },
+      children: 'Wird geladen…'
+    })
+  }
+
+  if (!configured) {
+    return jsx(SetupView, {
+      api,
+      onDone: () => setConfigured(true)
+    })
+  }
 
   return jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
