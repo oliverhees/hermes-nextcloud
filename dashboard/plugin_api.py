@@ -1,11 +1,11 @@
-"""hermes-fokus - Backend.
+"""hermes-nextcloud - Backend.
 
 ADHS-konformer Aufgabenplaner. Nextcloud (CalDAV) ist die alleinige Wahrheit
 fuer Titel, Faelligkeit und Status. Dieses Backend haelt daneben nur die
 ADHS-Anreicherung: Fokus-Reihenfolge, Teilschritte, Snooze - UID-verschluesselt,
 niemals eine Kopie von Titel oder Status (ISC-26).
 
-Routen liegen unter /api/plugins/hermes-fokus/ und damit hinter dem Auth-Gate.
+Routen liegen unter /api/plugins/hermes-nextcloud/ und damit hinter dem Auth-Gate.
 
 Fehlt die Nextcloud-Konfiguration, antwortet jede Route mit einem klaren 4xx
 statt den ganzen Router beim Import zu sprengen - ein Plugin, das den
@@ -31,7 +31,7 @@ from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
-PLUGIN_ID = "hermes-fokus"
+PLUGIN_ID = "hermes-nextcloud"
 DEFAULT_CALENDAR = "Fokus-Aufgaben"
 DEFAULT_SNOOZE_MINUTES = 60
 MAX_TITLE_LEN = 500
@@ -129,7 +129,7 @@ CREDENTIALS_FILE = STATE_DIR / "credentials.json"
 _state_lock = threading.Lock()
 
 SETUP_HINT = (
-    "Nextcloud noch nicht verbunden. Oeffne den Fokus-Tab in Hermes Desktop - "
+    "Nextcloud noch nicht verbunden. Oeffne das Nextcloud-Plugin in Hermes Desktop - "
     "dort fragt ein Einrichtungs-Formular Host, Benutzername und App-Passwort ab "
     "(Anleitung in der README des Plugins)."
 )
@@ -141,7 +141,7 @@ SETUP_HINT = (
 #   1. credentials.json (dieser Ordner) - vom Einrichtungs-Formular im Plugin
 #      selbst geschrieben, chmod 600, ausserhalb von Hermes' eigener config.yaml.
 #      Das ist der dokumentierte Weg: niemand soll von Hand YAML editieren.
-#   2. plugins.hermes-fokus / plugins.entries.hermes-fokus in config.yaml - ein
+#   2. plugins.hermes-nextcloud / plugins.entries.hermes-nextcloud in config.yaml - ein
 #      Fallback fuer Leute, die das lieber deklarativ pflegen. Beide Stellen,
 #      weil Hermes seine config.yaml beim Speichern neu schreibt und dabei
 #      unbekannte Schluessel unter 'plugins' verlieren kann.

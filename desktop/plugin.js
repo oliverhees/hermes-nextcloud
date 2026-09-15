@@ -1,5 +1,5 @@
 /**
- * hermes-fokus - Desktop-Fassung.
+ * hermes-nextcloud - Desktop-Fassung.
  *
  * ADHS-konformer Aufgabenplaner. Ein Bildschirm, eine Entscheidung: die
  * Fokusansicht zeigt GENAU EINE Aufgabe, nie die Liste. Die Tagesuebersicht
@@ -11,8 +11,8 @@
  * react/jsx-runtime). Farben ausschliesslich ueber var(--ui-*), sonst bricht
  * jeder Theme-Wechsel.
  *
- * Backend: ~/.hermes/plugins/hermes-fokus/dashboard/plugin_api.py
- * ctx.rest() zeigt automatisch auf /api/plugins/hermes-fokus/.
+ * Backend: ~/.hermes/plugins/hermes-nextcloud/dashboard/plugin_api.py
+ * ctx.rest() zeigt automatisch auf /api/plugins/hermes-nextcloud/.
  */
 
 import { jsx, jsxs } from 'react/jsx-runtime'
@@ -32,8 +32,8 @@ import {
   PALETTE_AREA
 } from '@hermes/plugin-sdk'
 
-const ID = 'hermes-fokus'
-const ROUTE = '/hermes-fokus'
+const ID = 'hermes-nextcloud'
+const ROUTE = '/hermes-nextcloud'
 const STORAGE_REMINDER_KEY = 'reminderMinutes'
 const STORAGE_TAB_KEY = 'lastTab'
 const DEFAULT_REMINDER_MINUTES = 50
@@ -2500,7 +2500,7 @@ function StatusChip() {
 
 export default {
   id: ID,
-  name: 'Fokus',
+  name: 'Nextcloud',
   register(ctx) {
     const api = makeApi(ctx)
 
@@ -2514,7 +2514,7 @@ export default {
       {
         id: 'nav',
         area: SIDEBAR_NAV_AREA,
-        data: { path: ROUTE, label: 'Fokus', codicon: 'target' }
+        data: { path: ROUTE, label: 'Nextcloud', codicon: 'cloud' }
       },
       {
         id: 'chip',
@@ -2526,7 +2526,7 @@ export default {
         id: 'open',
         area: PALETTE_AREA,
         data: {
-          id: 'hermes-fokus.open',
+          id: 'hermes-nextcloud.open',
           label: 'Fokus öffnen',
           keywords: ['fokus', 'aufgabe', 'todo', 'adhs'],
           run: () => host.navigate(ROUTE)

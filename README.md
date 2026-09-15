@@ -1,11 +1,15 @@
-# hermes-fokus
+# hermes-nextcloud
 
-ADHS-konformer Aufgabenplaner als Hermes-Desktop-Plugin. Er zeigt **genau eine**
-nächste Aufgabe statt einer Liste, nimmt jeden Gedanken sofort über eine
-Capture-Leiste auf, und mischt Aufgaben und Nextcloud-Termine auf eine
-gemeinsame Tagesachse — ohne Rot, ohne Mahnton. Wer stattdessen den großen
-Überblick braucht, öffnet den Kalender-Tab: ein klassisches Monatsraster, aus
-dem heraus sich jeder Tag im Detail aufklappen lässt.
+Nextcloud-Dashboard als Hermes-Desktop-Plugin — Kalender, Aufgaben und weitere
+Nextcloud-Bereiche direkt im Hermes-Fenster, mit vollem Lese-/Schreibzugriff
+(Termine anlegen/verschieben per Drag-and-Drop, Aufgaben abschließen).
+
+Bringt einen eingebauten **ADHS-Fokus-Modus** mit — ein Feature, kein
+Zwang: genau **eine** nächste Aufgabe statt einer Liste, sofortige
+Brain-Dump-Erfassung, Aufgaben+Termine auf einer ruhigen Tagesachse ohne Rot
+und ohne Mahnton, dazu Gamification (XP, Level, Streaks, Erfolge). Wer den
+großen Überblick will, öffnet den Kalender-Tab: Monatsraster, Wochenansicht
+mit Stundenraster, „Ungeplante Aufgaben"-Seitenpanel.
 
 Nextcloud (CalDAV) ist die alleinige Wahrheit für Titel, Termin und Status. Das
 Plugin legt daneben nur ADHS-Zusatzdaten ab: Fokus-Reihenfolge, Teilschritte,
@@ -27,11 +31,11 @@ verloren". Ein ausgelassener Tag setzt den Streak still zurück.
 | Datei | Rolle |
 |---|---|
 | `plugin.yaml` | Agent-Hälfte (Name, Version, Autor) |
-| `dashboard/manifest.json` | mountet `plugin_api.py` unter `/api/plugins/hermes-fokus/` |
+| `dashboard/manifest.json` | mountet `plugin_api.py` unter `/api/plugins/hermes-nextcloud/` |
 | `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher, XP-/Erfolgs-Logik |
 | `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, vier Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender mit Monat/Woche/Tag), Konfetti-Feier, Drag-and-Drop, Inline-Formulare |
-| `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-fokus/` (Linux/macOS) |
-| `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-fokus\`) |
+| `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-nextcloud/` (Linux/macOS) |
+| `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-nextcloud\`) |
 
 `dashboard/manifest.json` trägt bewusst **kein** `tab`- und kein `entry`-Feld.
 Beide gehören zum Web-Dashboard-Plugin-System, das mit dem Desktop-SDK nichts zu
@@ -112,7 +116,7 @@ einen Tag gibt ihnen eine Fälligkeit.
 .\deploy.ps1
 ```
 
-Beide Skripte kopieren identisch nach `$HERMES_HOME/plugins/hermes-fokus/`
+Beide Skripte kopieren identisch nach `$HERMES_HOME/plugins/hermes-nextcloud/`
 (Windows-Default: `%LOCALAPPDATA%\hermes`, sonst `~/.hermes`). Danach Hermes
 Desktop **komplett** neu starten (nicht nur das Fenster neu laden) und in
 **Capabilities → Plugins** den Eintrag „Fokus" einschalten. Wird nur
@@ -130,7 +134,7 @@ venv), meldet `/status` den genauen Grund inklusive Fallback-Befehl.
 ### 1. Nextcloud-App-Passwort erzeugen
 
 In Nextcloud unter **Einstellungen → Sicherheit → App-Passwort erstellen** ein
-neues Passwort mit dem Namen `hermes-fokus` anlegen. Ein eigenes, nur für dieses
+neues Passwort mit dem Namen `hermes-nextcloud` anlegen. Ein eigenes, nur für dieses
 Plugin — nicht das aus einem anderen Tool wiederverwenden.
 
 ### 2. Im Plugin selbst verbinden
@@ -142,7 +146,7 @@ klicken. Das Backend testet die Verbindung sofort gegen Nextcloud — gespeicher
 wird nur, wenn der Test klappt, sonst steht der Fehler direkt im Formular.
 
 Die Zugangsdaten landen danach in
-`$HERMES_HOME/hermes-fokus/credentials.json` (Datei-Rechte `600`, nur der
+`$HERMES_HOME/hermes-nextcloud/credentials.json` (Datei-Rechte `600`, nur der
 eigene Unix-User kann sie lesen) — **nicht** in `~/.hermes/config.yaml`. Das
 Plugin verwaltet diese Datei selbst; von Hand muss darin nichts geändert
 werden.
@@ -151,7 +155,7 @@ werden.
 <summary>Alternative: manuell in config.yaml (fortgeschritten, optional)</summary>
 
 Wer YAML von Hand pflegen möchte, kann statt des Formulars auch einen Block
-unter `plugins.hermes-fokus` bzw. `plugins.entries.hermes-fokus` in
+unter `plugins.hermes-nextcloud` bzw. `plugins.entries.hermes-nextcloud` in
 `~/.hermes/config.yaml` eintragen (Felder `host`, `username`, `app_password`,
 optional `calendar_name`, `read_calendars`). Das Backend prüft zuerst
 `credentials.json` und fällt nur auf diesen Block zurück, wenn die Datei
@@ -179,14 +183,14 @@ an.
 - **Nextcloud**: Aufgaben (VTODO im Kalender `Fokus-Aufgaben`, lesen+schreiben),
   Termine in regulären Kalendern (lesen, plus anlegen/verschieben aus dem
   Kalender-Tab heraus — seit v1.2, siehe Verhaltenswechsel oben)
-- **`$HERMES_HOME/hermes-fokus/credentials.json`** (chmod 600): Nextcloud-Host,
+- **`$HERMES_HOME/hermes-nextcloud/credentials.json`** (chmod 600): Nextcloud-Host,
   Benutzername, App-Passwort — vom Einrichtungs-Formular geschrieben
-- **`$HERMES_HOME/hermes-fokus/enrichment.json`**: Fokus-Reihenfolge,
+- **`$HERMES_HOME/hermes-nextcloud/enrichment.json`**: Fokus-Reihenfolge,
   Teilschritte, Snooze — UID-verschlüsselt, ohne Kopie von Titel oder Status —
   plus der Fortschritt unter `gamification` (XP, Streak, freigeschaltete
   Erfolge). Ältere Dateien ohne diesen Block werden beim Lesen ergänzt, es geht
   nichts verloren.
-- **`ctx.storage`** (`hermes.plugin.hermes-fokus.*`): zuletzt gewählter Tab,
+- **`ctx.storage`** (`hermes.plugin.hermes-nextcloud.*`): zuletzt gewählter Tab,
   Erinnerungs-Intervall
 
 Nichts davon liegt im `~/.hermes/hermes-agent`-Checkout, also überlebt alles ein

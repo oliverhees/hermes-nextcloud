@@ -1,9 +1,11 @@
-name: hermes-fokus
+name: hermes-nextcloud
 manifest_version: 1
 version: 0.1.0
 description: >
-  Fokus - ADHS-konformer Aufgabenplaner fuer Hermes Desktop. Brain-Dump-
-  Erfassung, genau eine naechste Aufgabe statt einer Liste, und eine
-  Tagesuebersicht aus Nextcloud-Aufgaben und -Terminen.
+  Nextcloud-Dashboard fuer Hermes Desktop: Kalender, Aufgaben und weitere
+  Nextcloud-Bereiche als Panes direkt im Hermes-Fenster. Bringt einen
+  optionalen ADHS-Fokus-Modus mit (Brain-Dump-Erfassung, genau eine naechste
+  Aufgabe statt einer Liste, Gamification) - abschaltbar, wenn der reine
+  Ueberblick reicht.
 author: Oliver Hees
-homepage: https://github.com/oliverhees/hermes-fokus
+homepage: https://github.com/oliverhees/hermes-nextcloud

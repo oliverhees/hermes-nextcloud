@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Kopiert hermes-fokus nach ~/.hermes/plugins/hermes-fokus/ (der Live-Ort, den
+# Kopiert hermes-nextcloud nach ~/.hermes/plugins/hermes-nextcloud/ (der Live-Ort, den
 # Hermes' Auto-Update NICHT anfasst — siehe README.md).
 #
 # Nutzung: ./deploy.sh
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${HERMES_HOME:-$HOME/.hermes}/plugins/hermes-fokus"
+TARGET="${HERMES_HOME:-$HOME/.hermes}/plugins/hermes-nextcloud"
 
-echo "Deploye hermes-fokus nach $TARGET ..."
+echo "Deploye hermes-nextcloud nach $TARGET ..."
 mkdir -p "$TARGET/dashboard" "$TARGET/desktop"
 
 cp "$REPO_DIR/plugin.yaml"             "$TARGET/plugin.yaml"
@@ -25,8 +25,8 @@ rm -rf "$TARGET/dashboard/__pycache__"
 echo ""
 echo "Fertig. Noch zu tun:"
 echo "  1. In ~/.hermes/config.yaml unter 'plugins.enabled' den Eintrag"
-echo "     '- hermes-fokus' ergaenzen (sonst wird plugin_api.py nie importiert)."
+echo "     '- hermes-nextcloud' ergaenzen (sonst wird plugin_api.py nie importiert)."
 echo "  2. Hermes Desktop komplett neu starten (nicht nur Fenster neu laden),"
-echo "     danach in Capabilities -> Plugins 'Fokus' einschalten."
-echo "  3. Nextcloud im Plugin selbst verbinden: 'Fokus' in der Seitenleiste"
+echo "     danach in Capabilities -> Plugins 'Nextcloud' einschalten."
+echo "  3. Nextcloud im Plugin selbst verbinden: 'Nextcloud' in der Seitenleiste"
 echo "     oeffnen, Einrichtungs-Formular ausfuellen. Kein config.yaml-Edit noetig."

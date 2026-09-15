@@ -1,4 +1,4 @@
-# Kopiert hermes-fokus nach $HERMES_HOME\plugins\hermes-fokus\ unter Windows.
+# Kopiert hermes-nextcloud nach $HERMES_HOME\plugins\hermes-nextcloud\ unter Windows.
 # Windows-Pendant zu deploy.sh - selbe Kopierlogik, weil PowerShell hier die
 # einzige Shell ist, die man ohne WSL/Git-Bash voraussetzen darf.
 #
@@ -15,9 +15,9 @@ if ($env:HERMES_HOME) {
 } else {
     $HermesHome = Join-Path $env:LOCALAPPDATA "hermes"
 }
-$Target = Join-Path $HermesHome "plugins\hermes-fokus"
+$Target = Join-Path $HermesHome "plugins\hermes-nextcloud"
 
-Write-Host "Deploye hermes-fokus nach $Target ..."
+Write-Host "Deploye hermes-nextcloud nach $Target ..."
 New-Item -ItemType Directory -Force -Path (Join-Path $Target "dashboard") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $Target "desktop") | Out-Null
 
@@ -35,7 +35,7 @@ if (Test-Path $PycacheDir) { Remove-Item -Recurse -Force $PycacheDir }
 Write-Host ""
 Write-Host "Fertig. Noch zu tun:"
 Write-Host "  1. In $HermesHome\config.yaml unter 'plugins.enabled' den Eintrag"
-Write-Host "     '- hermes-fokus' ergaenzen (sonst wird plugin_api.py nie importiert)."
-Write-Host "  2. Hermes Desktop komplett neu starten, danach in Capabilities -> Plugins 'Fokus' einschalten."
-Write-Host "  3. Nextcloud im Plugin selbst verbinden: 'Fokus' in der Seitenleiste oeffnen, Formular ausfuellen."
+Write-Host "     '- hermes-nextcloud' ergaenzen (sonst wird plugin_api.py nie importiert)."
+Write-Host "  2. Hermes Desktop komplett neu starten, danach in Capabilities -> Plugins 'Nextcloud' einschalten."
+Write-Host "  3. Nextcloud im Plugin selbst verbinden: 'Nextcloud' in der Seitenleiste oeffnen, Formular ausfuellen."
 Write-Host "     'caldav' installiert sich beim ersten Laden automatisch, falls es fehlt - kein manueller pip-Befehl noetig."
