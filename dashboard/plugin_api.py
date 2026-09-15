@@ -358,6 +358,48 @@ def _ical_dt(comp, key: str) -> dt.datetime | None:
     return None
 
 
+def _local_day_key(comp, key: str) -> str | None:
+    """Auf welchen KALENDERTAG faellt dieses Feld, lokal gesehen?
+
+    Bewusst nicht ueber _ical_dt: ein ganztaegiger Termin steht im iCal als
+    reines DATE ohne Zeitzone. Wuerde man den erst auf UTC-Mitternacht heben und
+    dann in die lokale Zone rechnen, rutschte er westlich von Greenwich um einen
+    Tag nach hinten. Ein DATE ist bereits der Tag - es gibt nichts umzurechnen.
+    """
+    value = comp.get(key)
+    inner = getattr(value, "dt", None) if value is not None else None
+    if inner is None:
+        return None
+    if isinstance(inner, dt.datetime):
+        moment = inner if inner.tzinfo else inner.replace(tzinfo=dt.timezone.utc)
+        return moment.astimezone().date().isoformat()
+    if isinstance(inner, dt.date):
+        return inner.isoformat()
+    return None
+
+
+def _is_all_day(comp, key: str) -> bool:
+    """Stand da ein reines DATE statt eines Zeitpunkts?
+
+    Ohne diese Unterscheidung zeigte die Oberflaeche fuer einen ganztaegigen
+    Eintrag eine Uhrzeit an, die niemand eingetragen hat - die UTC-Mitternacht,
+    in Ortszeit umgerechnet.
+    """
+    value = comp.get(key)
+    inner = getattr(value, "dt", None) if value is not None else None
+    return isinstance(inner, dt.date) and not isinstance(inner, dt.datetime)
+
+
+def _local_day_start(day: dt.date) -> dt.datetime:
+    """Mitternacht dieses Tages in der lokalen Zeitzone.
+
+    Ueber eine naive datetime plus .astimezone(), weil das den fuer DIESEN Tag
+    gueltigen Zeitzonen-Versatz nimmt. Den Offset von heute auf ein anderes
+    Datum zu kleben waere ueber einer Sommerzeit-Grenze um eine Stunde falsch.
+    """
+    return dt.datetime(day.year, day.month, day.day).astimezone()
+
+
 def _iso(value: dt.datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -378,6 +420,11 @@ def _todo_view(todo) -> dict | None:
         "title": _ical_text(comp, "SUMMARY") or "(ohne Titel)",
         "status": (_ical_text(comp, "STATUS") or "NEEDS-ACTION").upper(),
         "due": _iso(_ical_dt(comp, "DUE")),
+        # Nur der Tagesteil, lokal gerechnet - danach gruppiert die
+        # Kalenderansicht. Getrennt von 'due', weil das ein Zeitpunkt ist und
+        # dieser hier ein Kalendertag.
+        "dueDay": _local_day_key(comp, "DUE"),
+        "dueAllDay": _is_all_day(comp, "DUE"),
         "created": _iso(_ical_dt(comp, "CREATED") or _ical_dt(comp, "DTSTAMP")),
     }
 
@@ -784,6 +831,112 @@ def _progress_view(gamification: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------- Kalender
+#
+# Der Ueberblick ist bewusst eine andere Sicht als der Fokus: er zeigt ALLES,
+# was an einem Tag haengt, auch Gesnooztes. Snooze heisst "jetzt nicht vor die
+# Nase", nicht "aus dem Kalender streichen" - ein Ueberblick, der etwas
+# verschweigt, ist keiner. Aufgaben ohne Faelligkeit tauchen hier gar nicht auf;
+# sie leben im Fokus-Eingang und haetten im Raster keinen Platz, an den sie
+# gehoeren.
+
+
+def _calendar_day_tasks(calendar, state: dict, target: dt.date) -> list[dict]:
+    """Offene Aufgaben, die an diesem Kalendertag faellig sind."""
+    key = target.isoformat()
+    found = []
+    for task in _open_todos(calendar):
+        if task.get("dueDay") != key:
+            continue
+        task["subtasks"] = _peek(state, task["uid"]).get("subtasks") or []
+        found.append(task)
+    found.sort(key=lambda t: _sort_key(state, t))
+    return found
+
+
+def _month_events(principal, cfg: dict, start: dt.datetime, end: dt.datetime) -> dict:
+    """Termine des ganzen Monats, gezaehlt pro Tag.
+
+    EIN search() pro Kalender ueber den kompletten Monat - nicht dreissig
+    Einzelabfragen. Ein Raster, das beim Blaettern eine Sekunde steht, waere
+    genau die Reibung, die diesen Tab unbenutzt liesse.
+    """
+    counts: dict[str, int] = {}
+    allowed = cfg["read_calendars"]
+    try:
+        calendars = principal.calendars()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Kalenderliste nicht abrufbar: {exc}"
+        ) from exc
+
+    for cal in calendars:
+        name = _calendar_name(cal)
+        if name == cfg["calendar_name"]:
+            continue
+        if allowed is not None and name not in allowed:
+            continue
+        try:
+            found = cal.search(start=start, end=end, event=True, expand=True)
+        except Exception:
+            # Wie in /day: ein stummer Kalender darf den Monat nicht leeren.
+            continue
+        for item in found:
+            comp = _component(item)
+            if comp is None:
+                continue
+            key = _local_day_key(comp, "DTSTART")
+            if key is None:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _month_view(principal, cfg: dict, calendar, gamification: dict, year: int, month: int) -> dict:
+    """Pro Tag drei Zahlen, mehr braucht ein Raster nicht.
+
+    Tage ohne jeden Wert fehlen in 'days' ganz - die Oberflaeche liest ein
+    fehlendes Datum als lauter Nullen. Weniger JSON, und im Raster bleibt der
+    leere Tag wirklich leer statt "0 · 0" zu tragen.
+    """
+    start = _local_day_start(dt.date(year, month, 1))
+    end = _local_day_start(
+        dt.date(year + 1, 1, 1) if month == 12 else dt.date(year, month + 1, 1)
+    )
+    prefix = f"{year:04d}-{month:02d}-"
+    days: dict[str, dict] = {}
+
+    def bucket(key: str) -> dict:
+        entry = days.get(key)
+        if entry is None:
+            entry = {"tasksOpen": 0, "tasksCompleted": 0, "events": 0}
+            days[key] = entry
+        return entry
+
+    for key, count in _month_events(principal, cfg, start, end).items():
+        if key.startswith(prefix) and count > 0:
+            bucket(key)["events"] += count
+
+    for task in _open_todos(calendar):
+        key = task.get("dueDay")
+        if key and key.startswith(prefix):
+            bucket(key)["tasksOpen"] += 1
+
+    # Erledigtes steht bereits im Fortschritt - kein zweiter CalDAV-Weg noetig.
+    for raw_day, raw_count in (gamification.get("completedByDate") or {}).items():
+        key = str(raw_day)
+        if not key.startswith(prefix):
+            continue
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            bucket(key)["tasksCompleted"] += count
+
+    return {"year": year, "month": month, "days": days}
+
+
 # ---------------------------------------------------------------- Routen
 
 
@@ -1018,19 +1171,43 @@ async def progress() -> dict:
 
 
 @router.get("/day")
-async def day() -> dict:
-    """Aufgaben und Termine des heutigen Tages auf einer Zeitachse.
+async def day(date: str | None = None) -> dict:
+    """Aufgaben und Termine eines Tages auf einer Zeitachse.
+
+    Ohne 'date' ist das wie bisher der heutige Tag in lokaler Zeitzone und die
+    Antwort verhaelt sich unveraendert - die Tagesuebersicht haengt daran.
+
+    Mit 'date' (YYYY-MM-DD) beantwortet dieselbe Route einen beliebigen Tag fuer
+    die Kalenderansicht. Dann werden die Aufgaben auf die mit Faelligkeit AN
+    DIESEM TAG eingegrenzt und der Snooze-Filter entfaellt - sonst zeigte eine
+    angeklickte Zelle andere Aufgaben, als im Monatsraster darauf standen.
 
     Termine werden nur GELESEN. Der Aufgaben-Kalender wird beim Durchsuchen der
     Termin-Kalender uebersprungen, sonst stuende jede Aufgabe doppelt da.
     """
+    if date is None:
+        target = _local_today()
+    else:
+        try:
+            target = dt.date.fromisoformat(date.strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="'date' muss ein Datum im Format YYYY-MM-DD sein.",
+            )
+        # Der letzte darstellbare Tag hat kein Morgen, und ohne Morgen gibt es
+        # kein Suchfenster.
+        if target >= dt.date(dt.MAXYEAR, 12, 31):
+            raise HTTPException(
+                status_code=422, detail="'date' liegt ausserhalb des darstellbaren Bereichs."
+            )
+
     principal, cfg = _principal()
     calendar = _task_calendar(principal, cfg)
     state = _read_enrichment()
 
-    local_now = dt.datetime.now().astimezone()
-    start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + dt.timedelta(days=1)
+    start = _local_day_start(target)
+    end = _local_day_start(target + dt.timedelta(days=1))
 
     events: list[dict] = []
     allowed = cfg["read_calendars"]
@@ -1065,9 +1242,15 @@ async def day() -> dict:
                     "title": _ical_text(comp, "SUMMARY") or "(ohne Titel)",
                     "start": _iso(begins),
                     "end": _iso(_ical_dt(comp, "DTEND")),
+                    "allDay": _is_all_day(comp, "DTSTART"),
                     "calendar": name,
                 }
             )
+
+    if date is None:
+        source = _ordered_open(calendar, state)
+    else:
+        source = _calendar_day_tasks(calendar, state, target)
 
     tasks = [
         {
@@ -1076,9 +1259,10 @@ async def day() -> dict:
             "title": t["title"],
             "start": t["due"],
             "end": None,
+            "allDay": bool(t.get("dueAllDay")),
             "subtasks": t.get("subtasks") or [],
         }
-        for t in _ordered_open(calendar, state)
+        for t in source
     ]
 
     # Termine haben eine Uhrzeit, Aufgaben meistens nicht. Terminierte Punkte
@@ -1089,10 +1273,39 @@ async def day() -> dict:
     )
     untimed = [x for x in tasks if not x["start"]]
     return {
-        "date": start.date().isoformat(),
+        "date": target.isoformat(),
         "items": timed + untimed,
+        # Dieselben Objekte wie in 'items', nur getrennt: die Kalenderansicht
+        # zeigt Aufgaben und Termine in zwei Abschnitten, weil nur das eine
+        # erledigt werden kann und das andere aus fremden Kalendern kommt.
+        "tasks": [x for x in timed if x["kind"] == "task"] + untimed,
+        "events": [x for x in timed if x["kind"] == "event"],
         "inbox": len(tasks),
     }
+
+
+@router.get("/month")
+async def month_overview(year: int, month: int) -> dict:
+    """Ein Monat als Zahlen pro Tag - die Datengrundlage des Kalender-Rasters.
+
+    Bewusst ohne Titel und ohne Listen: das Raster zeigt nur, WO etwas liegt.
+    Was genau, holt die Tagesansicht ueber /day?date=... nach.
+    """
+    if not 1 <= month <= 12:
+        raise HTTPException(status_code=422, detail="'month' muss zwischen 1 und 12 liegen.")
+    # Obergrenze ein Jahr unter MAXYEAR: _month_view braucht fuer den Dezember
+    # den 1. Januar des Folgejahres als Monatsende, und den gibt es fuer 9999
+    # nicht mehr.
+    if not dt.MINYEAR <= year <= dt.MAXYEAR - 1:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'year' muss zwischen {dt.MINYEAR} und {dt.MAXYEAR - 1} liegen.",
+        )
+
+    principal, cfg = _principal()
+    calendar = _task_calendar(principal, cfg)
+    state = _read_enrichment()
+    return _month_view(principal, cfg, calendar, state["gamification"], year, month)
 
 
 @router.post("/reminder/check")

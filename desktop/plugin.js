@@ -70,7 +70,10 @@ function makeApi(ctx) {
     complete: uid => call('/focus/complete', 'POST', { uid }),
     defer: uid => call('/focus/defer', 'POST', { uid, minutes: DEFER_MINUTES }),
     breakdown: (uid, steps) => call('/focus/breakdown', 'POST', { uid, steps }),
-    day: () => call('/day', 'GET'),
+    // Ohne Datum bleibt es der heutige Tag - die Tagesuebersicht ruft weiter
+    // genau so auf wie vorher.
+    day: dateStr => call(dateStr ? `/day?date=${dateStr}` : '/day', 'GET'),
+    month: (year, monthNum) => call(`/month?year=${year}&month=${monthNum}`, 'GET'),
     progress: () => call('/progress', 'GET'),
     reminder: intervalMinutes =>
       call('/reminder/check', 'POST', { intervalMinutes })
@@ -264,6 +267,99 @@ function tapHaptic() {
   // Helfer noch nicht, und ein fehlendes Rueckmeldungs-Detail darf das
   // Erledigen nicht abbrechen.
   if (typeof haptic === 'function') haptic('tap')
+}
+
+/**
+ * Die komplette Feier als Hook, damit jede Stelle, an der etwas erledigt
+ * werden kann, dieselbe bekommt. Zwei Kopien wuerden sofort auseinanderlaufen -
+ * und ein Erledigt-Knopf, der mal feiert und mal nicht, ist schlimmer als
+ * einer, der nie feiert.
+ *
+ * Timer und Canvas haengen an einem Cleanup, sonst tickt nach einem
+ * Tab-Wechsel ein Timer gegen eine verschwundene Komponente.
+ */
+function useCelebration() {
+  const [cheer, setCheer] = useState(null)
+  const confettiRef = useRef(null)
+
+  useEffect(() => {
+    if (!cheer) return undefined
+    const timer = setTimeout(() => setCheer(null), 2200)
+    return () => clearTimeout(timer)
+  }, [cheer])
+
+  useEffect(
+    () => () => {
+      if (confettiRef.current) confettiRef.current()
+    },
+    []
+  )
+
+  const announce = reward => {
+    if (!reward || typeof reward.xpGained !== 'number') return
+    const leveledUp = Boolean(reward.leveledUp)
+    if (confettiRef.current) confettiRef.current()
+    confettiRef.current = celebrate(leveledUp ? 70 : 32, leveledUp ? 1500 : 1150)
+    setCheer({
+      text: leveledUp ? `Level ${reward.level}` : pickCheer(),
+      xp: reward.xpGained,
+      leveledUp
+    })
+    const unlocked = Array.isArray(reward.unlockedAchievements)
+      ? reward.unlockedAchievements
+      : []
+    for (const item of unlocked) {
+      // In-App-Toast, nicht ctx.os.notify: die native Meldung bleibt der
+      // sanften Erinnerung vorbehalten und wird nicht mit Erfolgen verwaessert.
+      host.notify({
+        kind: 'success',
+        title: 'Erfolg freigeschaltet',
+        message: item.title
+      })
+    }
+  }
+
+  return { cheer, announce }
+}
+
+/** Der Spruch-Toast. Der umgebende Container braucht position: relative. */
+function CelebrationToast({ cheer }) {
+  if (!cheer) return null
+  return jsxs('div', {
+    style: {
+      position: 'absolute',
+      top: '14px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 2,
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: '10px',
+      borderRadius: '999px',
+      border: '1px solid var(--ui-accent)',
+      padding: cheer.leveledUp ? '10px 20px' : '7px 16px',
+      background: 'var(--ui-bg-secondary)',
+      pointerEvents: 'none'
+    },
+    children: [
+      jsx('span', {
+        style: {
+          fontSize: cheer.leveledUp ? '1.05rem' : '0.86rem',
+          fontWeight: 800,
+          color: 'var(--ui-text-primary)'
+        },
+        children: cheer.leveledUp ? `🎉 ${cheer.text}` : cheer.text
+      }),
+      jsx('span', {
+        style: {
+          fontSize: '0.78rem',
+          fontWeight: 700,
+          color: 'var(--ui-accent)'
+        },
+        children: `+${cheer.xp} XP`
+      })
+    ]
+  })
 }
 
 // ---------------------------------------------------------------- Bausteine
@@ -464,7 +560,8 @@ function Tabs({ value, onChange }) {
     children: [
       tab('fokus', 'Fokus'),
       tab('tag', 'Tagesübersicht'),
-      tab('fortschritt', 'Fortschritt')
+      tab('fortschritt', 'Fortschritt'),
+      tab('kalender', 'Kalender')
     ]
   })
 }
@@ -473,30 +570,13 @@ function FokusView({ api, state, reload, setError }) {
   const [breaking, setBreaking] = useState(false)
   const [steps, setSteps] = useState('')
   const [busy, setBusy] = useState(false)
-  const [cheer, setCheer] = useState(null)
-  const confettiRef = useRef(null)
+  const { cheer, announce } = useCelebration()
   const task = state.task
 
   useEffect(() => {
     setBreaking(false)
     setSteps('')
   }, [task && task.uid])
-
-  // Der Spruch verschwindet von selbst. Timer und Canvas haengen an einem
-  // Cleanup, sonst tickt nach einem Tab-Wechsel ein Timer gegen eine
-  // verschwundene Komponente.
-  useEffect(() => {
-    if (!cheer) return undefined
-    const timer = setTimeout(() => setCheer(null), 2200)
-    return () => clearTimeout(timer)
-  }, [cheer])
-
-  useEffect(
-    () => () => {
-      if (confettiRef.current) confettiRef.current()
-    },
-    []
-  )
 
   const act = fn => {
     if (busy) return
@@ -506,30 +586,6 @@ function FokusView({ api, state, reload, setError }) {
       .then(() => reload())
       .catch(error => setError(describeError(error)))
       .then(() => setBusy(false), () => setBusy(false))
-  }
-
-  const announce = reward => {
-    if (!reward || typeof reward.xpGained !== 'number') return
-    const leveledUp = Boolean(reward.leveledUp)
-    if (confettiRef.current) confettiRef.current()
-    confettiRef.current = celebrate(leveledUp ? 70 : 32, leveledUp ? 1500 : 1150)
-    setCheer({
-      text: leveledUp ? `Level ${reward.level}` : pickCheer(),
-      xp: reward.xpGained,
-      leveledUp
-    })
-    const unlocked = Array.isArray(reward.unlockedAchievements)
-      ? reward.unlockedAchievements
-      : []
-    for (const item of unlocked) {
-      // In-App-Toast, nicht ctx.os.notify: die native Meldung bleibt der
-      // sanften Erinnerung vorbehalten und wird nicht mit Erfolgen verwaessert.
-      host.notify({
-        kind: 'success',
-        title: 'Erfolg freigeschaltet',
-        message: item.title
-      })
-    }
   }
 
   const complete = () => {
@@ -569,43 +625,7 @@ function FokusView({ api, state, reload, setError }) {
       position: 'relative'
     },
     children: [
-      cheer
-        ? jsxs('div', {
-            style: {
-              position: 'absolute',
-              top: '14px',
-              left: '50%',
-              transform: 'translateX(-50%)',
-              zIndex: 2,
-              display: 'flex',
-              alignItems: 'baseline',
-              gap: '10px',
-              borderRadius: '999px',
-              border: '1px solid var(--ui-accent)',
-              padding: cheer.leveledUp ? '10px 20px' : '7px 16px',
-              background: 'var(--ui-bg-secondary)',
-              pointerEvents: 'none'
-            },
-            children: [
-              jsx('span', {
-                style: {
-                  fontSize: cheer.leveledUp ? '1.05rem' : '0.86rem',
-                  fontWeight: 800,
-                  color: 'var(--ui-text-primary)'
-                },
-                children: cheer.leveledUp ? `🎉 ${cheer.text}` : cheer.text
-              }),
-              jsx('span', {
-                style: {
-                  fontSize: '0.78rem',
-                  fontWeight: 700,
-                  color: 'var(--ui-accent)'
-                },
-                children: `+${cheer.xp} XP`
-              })
-            ]
-          })
-        : null,
+      jsx(CelebrationToast, { cheer }),
       jsx('div', {
         style: {
           fontSize: '0.68rem',
@@ -1000,6 +1020,446 @@ function ProgressView({ data, loading }) {
   })
 }
 
+// ---------------------------------------------------------------- Kalender
+
+const WEEKDAYS = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']
+const EMPTY_DAY = { tasksOpen: 0, tasksCompleted: 0, events: 0 }
+
+function pad2(value) {
+  return String(value).padStart(2, '0')
+}
+
+function dayKeyOf(year, month, day) {
+  return `${year}-${pad2(month)}-${pad2(day)}`
+}
+
+function plural(count, one, many) {
+  return count === 1 ? `1 ${one}` : `${count} ${many}`
+}
+
+/** Ganztaegiges hat keine Uhrzeit - eine zu erfinden waere schlimmer als keine. */
+function whenLabel(item) {
+  if (!item || !item.start) return ''
+  if (item.allDay) return 'ganztägig'
+  return clockOf(item.start)
+}
+
+function monthTitle(year, month) {
+  return new Date(year, month - 1, 1).toLocaleDateString('de-DE', {
+    month: 'long',
+    year: 'numeric'
+  })
+}
+
+function longDate(key) {
+  const parts = String(key || '').split('-')
+  if (parts.length !== 3) return ''
+  return new Date(
+    Number(parts[0]),
+    Number(parts[1]) - 1,
+    Number(parts[2])
+  ).toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' })
+}
+
+function NavButton({ label, title, onClick }) {
+  return jsx('button', {
+    type: 'button',
+    onClick,
+    title,
+    style: {
+      font: 'inherit',
+      fontSize: '0.82rem',
+      background: 'none',
+      border: '1px solid var(--ui-stroke-secondary)',
+      borderRadius: '8px',
+      cursor: 'pointer',
+      padding: '4px 10px',
+      color: 'var(--ui-text-secondary)'
+    },
+    children: label
+  })
+}
+
+function MonthGrid({ year, month, days, loading, onPick }) {
+  const first = new Date(year, month - 1, 1)
+  // getDay() zaehlt ab Sonntag, das Raster beginnt am Montag.
+  const lead = (first.getDay() + 6) % 7
+  const total = new Date(year, month, 0).getDate()
+  const trail = (7 - ((lead + total) % 7)) % 7
+
+  const now = new Date()
+  const todayKey = dayKeyOf(now.getFullYear(), now.getMonth() + 1, now.getDate())
+
+  const cells = []
+  for (let i = 0; i < lead; i += 1) {
+    cells.push(jsx('div', { style: { minHeight: '64px' } }, `lead-${i}`))
+  }
+  for (let day = 1; day <= total; day += 1) {
+    const key = dayKeyOf(year, month, day)
+    const entry = days[key] || EMPTY_DAY
+    const isToday = key === todayKey
+    const parts = []
+    if (entry.tasksOpen > 0) parts.push(plural(entry.tasksOpen, 'Aufgabe', 'Aufgaben'))
+    if (entry.events > 0) parts.push(plural(entry.events, 'Termin', 'Termine'))
+
+    cells.push(
+      jsxs('button', {
+        type: 'button',
+        onClick: () => onPick(key),
+        style: {
+          font: 'inherit',
+          textAlign: 'left',
+          cursor: 'pointer',
+          background: 'none',
+          border: `1px solid ${
+            isToday ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)'
+          }`,
+          borderRadius: '10px',
+          padding: '7px 8px',
+          minHeight: '64px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px'
+        },
+        children: [
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'center', gap: '5px' },
+            children: [
+              jsx('span', {
+                style: {
+                  fontSize: '0.82rem',
+                  fontWeight: isToday ? 800 : 600,
+                  color: 'var(--ui-text-primary)',
+                  fontVariantNumeric: 'tabular-nums'
+                },
+                children: String(day)
+              }),
+              // Der Gamification-Anker im Raster: ein Punkt, kein Balken. Das
+              // Raster muss scanbar bleiben, sonst ist es kein Ueberblick mehr.
+              entry.tasksCompleted > 0
+                ? jsx('span', {
+                    title: `${plural(entry.tasksCompleted, 'Aufgabe', 'Aufgaben')} erledigt`,
+                    style: {
+                      width: '5px',
+                      height: '5px',
+                      borderRadius: '999px',
+                      background: 'var(--ui-accent)'
+                    }
+                  })
+                : null
+            ]
+          }),
+          // Ein leerer Tag zeigt nur seine Zahl. Ruhe ist hier Absicht.
+          parts.length
+            ? jsx('div', {
+                style: {
+                  fontSize: '0.68rem',
+                  lineHeight: 1.3,
+                  color: 'var(--ui-text-tertiary)'
+                },
+                children: parts.join(' · ')
+              })
+            : null
+        ]
+      }, key)
+    )
+  }
+  for (let i = 0; i < trail; i += 1) {
+    cells.push(jsx('div', { style: { minHeight: '64px' } }, `trail-${i}`))
+  }
+
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: '6px' },
+    children: [
+      jsx('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'repeat(7, 1fr)',
+          gap: '6px'
+        },
+        children: WEEKDAYS.map(name =>
+          jsx('div', {
+            style: {
+              fontSize: '0.68rem',
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              color: 'var(--ui-text-tertiary)',
+              padding: '0 2px'
+            },
+            children: name
+          }, name)
+        )
+      }),
+      jsx('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'repeat(7, 1fr)',
+          gap: '6px',
+          opacity: loading ? 0.5 : 1,
+          transition: 'opacity 160ms ease'
+        },
+        children: cells
+      })
+    ]
+  })
+}
+
+function DayRow({ title, meta, action }) {
+  return jsxs('div', {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      border: '1px solid var(--ui-stroke-secondary)',
+      borderRadius: '10px',
+      padding: '9px 11px'
+    },
+    children: [
+      jsxs('div', {
+        style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' },
+        children: [
+          jsx('div', {
+            style: { fontSize: '0.86rem', color: 'var(--ui-text-primary)' },
+            children: title
+          }),
+          meta
+            ? jsx('div', {
+                style: { fontSize: '0.72rem', color: 'var(--ui-text-tertiary)' },
+                children: meta
+              })
+            : null
+        ]
+      }),
+      action
+    ]
+  })
+}
+
+function DaySection({ label, children }) {
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: '8px' },
+    children: [
+      jsx('div', {
+        style: {
+          fontSize: '0.68rem',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+          color: 'var(--ui-text-tertiary)'
+        },
+        children: label
+      }),
+      ...children
+    ]
+  })
+}
+
+/**
+ * Der Ueberblick, den die Fokusansicht bewusst verweigert: ein ganzer Monat auf
+ * einen Blick, und pro Tag die Details erst auf Klick. Zwei Zustaende, kein
+ * Router - 'month' zeigt das Raster, 'day' den angeklickten Tag.
+ */
+function CalendarView({ api, month, days, loading, onMonth, onRefresh, setError }) {
+  const [mode, setMode] = useState('month')
+  const [selected, setSelected] = useState('')
+  const [dayData, setDayData] = useState({ tasks: [], events: [] })
+  const [dayLoading, setDayLoading] = useState(false)
+  const [busyUid, setBusyUid] = useState('')
+  const { cheer, announce } = useCelebration()
+
+  // Eigener Ladezyklus, bewusst getrennt vom Tagesuebersicht-Tab: beide duerfen
+  // unterschiedliche Tage zeigen, ohne sich gegenseitig zu ueberschreiben.
+  useEffect(() => {
+    if (mode !== 'day' || !selected) return undefined
+    let alive = true
+    setDayLoading(true)
+    api
+      .day(selected)
+      .then(data => {
+        if (!alive) return
+        setDayData({
+          tasks: Array.isArray(data && data.tasks) ? data.tasks : [],
+          events: Array.isArray(data && data.events) ? data.events : []
+        })
+        setError('')
+      })
+      .catch(error => {
+        if (alive) setError(describeError(error))
+      })
+      .then(
+        () => {
+          if (alive) setDayLoading(false)
+        },
+        () => {
+          if (alive) setDayLoading(false)
+        }
+      )
+    return () => {
+      alive = false
+    }
+  }, [mode, selected])
+
+  const open = key => {
+    setSelected(key)
+    setDayData({ tasks: [], events: [] })
+    setMode('day')
+  }
+
+  const shift = delta => {
+    const next = new Date(month.year, month.month - 1 + delta, 1)
+    onMonth({ year: next.getFullYear(), month: next.getMonth() + 1 })
+  }
+
+  const goToday = () => {
+    const now = new Date()
+    const year = now.getFullYear()
+    const monthNum = now.getMonth() + 1
+    if (year !== month.year || monthNum !== month.month) onMonth({ year, month: monthNum })
+    open(dayKeyOf(year, monthNum, now.getDate()))
+  }
+
+  const complete = uid => {
+    if (busyUid) return
+    tapHaptic()
+    setBusyUid(uid)
+    api
+      .complete(uid)
+      .then(result => {
+        announce(result && result.gamification)
+        // Optimistisch: die Zeile geht sofort. Das Raster im Hintergrund wird
+        // nachgezogen, damit die Zahlen beim Zurueckgehen stimmen.
+        setDayData(current => ({
+          tasks: current.tasks.filter(item => item.uid !== uid),
+          events: current.events
+        }))
+        return onRefresh()
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setBusyUid(''), () => setBusyUid(''))
+  }
+
+  if (mode === 'day') {
+    const tasks = dayData.tasks
+    const events = dayData.events
+    return jsxs('div', {
+      style: {
+        position: 'relative',
+        padding: '16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '16px',
+        maxWidth: '620px',
+        margin: '0 auto',
+        width: '100%'
+      },
+      children: [
+        jsx(CelebrationToast, { cheer }),
+        jsxs('div', {
+          style: { display: 'flex', alignItems: 'center', gap: '10px' },
+          children: [
+            jsx(NavButton, {
+              label: '← Zurück zum Monat',
+              title: 'Zurück zur Monatsansicht',
+              onClick: () => setMode('month')
+            }),
+            jsx('div', {
+              style: {
+                fontWeight: 700,
+                fontSize: '0.95rem',
+                color: 'var(--ui-text-primary)'
+              },
+              children: longDate(selected)
+            })
+          ]
+        }),
+        dayLoading
+          ? jsx('div', {
+              style: { color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' },
+              children: 'Tag wird geladen…'
+            })
+          : !tasks.length && !events.length
+            ? jsx(EmptyState, {
+                title: 'Nichts eingetragen an diesem Tag.',
+                description: 'Weder fällige Aufgaben noch Termine im Kalender.'
+              })
+            : jsxs('div', {
+                style: { display: 'flex', flexDirection: 'column', gap: '18px' },
+                children: [
+                  tasks.length
+                    ? jsx(DaySection, {
+                        label: 'Aufgaben',
+                        children: tasks.map(item =>
+                          jsx(DayRow, {
+                            title: item.title,
+                            meta: whenLabel(item) ? `fällig ${whenLabel(item)}` : '',
+                            action: jsx(Button, {
+                              onClick: () => complete(item.uid),
+                              disabled: Boolean(busyUid),
+                              children: 'Erledigt'
+                            })
+                          }, item.uid)
+                        )
+                      })
+                    : null,
+                  events.length
+                    ? jsx(DaySection, {
+                        label: 'Termine',
+                        children: events.map(item =>
+                          jsx(DayRow, {
+                            title: item.title,
+                            meta: [whenLabel(item), durationOf(item), item.calendar]
+                              .filter(Boolean)
+                              .join(' · '),
+                            action: null
+                          }, `${item.uid || item.title}-${item.start || ''}`)
+                        )
+                      })
+                    : null
+                ]
+              })
+      ]
+    })
+  }
+
+  return jsxs('div', {
+    style: {
+      padding: '16px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '14px',
+      maxWidth: '760px',
+      margin: '0 auto',
+      width: '100%'
+    },
+    children: [
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'center', gap: '8px' },
+        children: [
+          jsx(NavButton, { label: '←', title: 'Voriger Monat', onClick: () => shift(-1) }),
+          jsx('div', {
+            style: {
+              flex: 1,
+              textAlign: 'center',
+              fontWeight: 700,
+              fontSize: '0.95rem',
+              color: 'var(--ui-text-primary)'
+            },
+            children: monthTitle(month.year, month.month)
+          }),
+          jsx(NavButton, { label: '→', title: 'Nächster Monat', onClick: () => shift(1) }),
+          jsx(NavButton, { label: 'Heute', title: 'Zum heutigen Tag', onClick: goToday })
+        ]
+      }),
+      jsx(MonthGrid, {
+        year: month.year,
+        month: month.month,
+        days: days || {},
+        loading,
+        onPick: open
+      })
+    ]
+  })
+}
+
 function FokusPage({ ctx }) {
   const api = makeApi(ctx)
   const [tab, setTab] = useState(() => ctx.storage.get(STORAGE_TAB_KEY, 'fokus'))
@@ -1008,6 +1468,12 @@ function FokusPage({ ctx }) {
   const [dayLoading, setDayLoading] = useState(false)
   const [progress, setProgress] = useState(null)
   const [progressLoading, setProgressLoading] = useState(false)
+  const [calMonth, setCalMonth] = useState(() => {
+    const now = new Date()
+    return { year: now.getFullYear(), month: now.getMonth() + 1 }
+  })
+  const [monthDays, setMonthDays] = useState({})
+  const [monthLoading, setMonthLoading] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   // null = wird gerade geprueft; erst danach entscheidet sich, ob das
@@ -1065,6 +1531,18 @@ function FokusPage({ ctx }) {
       .then(() => setProgressLoading(false), () => setProgressLoading(false))
   }, [])
 
+  const loadMonth = useCallback((year, monthNum) => {
+    setMonthLoading(true)
+    return api
+      .month(year, monthNum)
+      .then(data => {
+        setMonthDays((data && data.days) || {})
+        setError('')
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setMonthLoading(false), () => setMonthLoading(false))
+  }, [])
+
   useEffect(() => {
     if (configured) void loadFocus()
   }, [configured, loadFocus])
@@ -1075,6 +1553,13 @@ function FokusPage({ ctx }) {
     if (tab === 'tag') void loadDay()
     if (tab === 'fortschritt') void loadProgress()
   }, [configured, tab, loadDay, loadProgress])
+
+  // Eigener Effekt, weil der Kalender nicht nur beim Tab-Wechsel neu laedt,
+  // sondern auch bei jedem Monatssprung.
+  useEffect(() => {
+    if (!configured || tab !== 'kalender') return
+    void loadMonth(calMonth.year, calMonth.month)
+  }, [configured, tab, calMonth, loadMonth])
 
   const capture = value => {
     setBusy(true)
@@ -1123,7 +1608,17 @@ function FokusPage({ ctx }) {
             ? jsx(FokusView, { api, state: focus, reload, setError })
             : tab === 'fortschritt'
               ? jsx(ProgressView, { data: progress, loading: progressLoading })
-              : jsx(TagView, { items: day.items || [], date: day.date, loading: dayLoading })
+              : tab === 'kalender'
+                ? jsx(CalendarView, {
+                    api,
+                    month: calMonth,
+                    days: monthDays,
+                    loading: monthLoading,
+                    onMonth: setCalMonth,
+                    onRefresh: () => loadMonth(calMonth.year, calMonth.month),
+                    setError
+                  })
+                : jsx(TagView, { items: day.items || [], date: day.date, loading: dayLoading })
       })
     ]
   })

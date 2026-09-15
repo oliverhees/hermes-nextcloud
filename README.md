@@ -3,7 +3,9 @@
 ADHS-konformer Aufgabenplaner als Hermes-Desktop-Plugin. Er zeigt **genau eine**
 nächste Aufgabe statt einer Liste, nimmt jeden Gedanken sofort über eine
 Capture-Leiste auf, und mischt Aufgaben und Nextcloud-Termine auf eine
-gemeinsame Tagesachse — ohne Rot, ohne Mahnton.
+gemeinsame Tagesachse — ohne Rot, ohne Mahnton. Wer stattdessen den großen
+Überblick braucht, öffnet den Kalender-Tab: ein klassisches Monatsraster, aus
+dem heraus sich jeder Tag im Detail aufklappen lässt.
 
 Nextcloud (CalDAV) ist die alleinige Wahrheit für Titel, Termin und Status. Das
 Plugin legt daneben nur ADHS-Zusatzdaten ab: Fokus-Reihenfolge, Teilschritte,
@@ -20,7 +22,7 @@ verloren". Ein ausgelassener Tag setzt den Streak still zurück.
 | `plugin.yaml` | Agent-Hälfte (Name, Version, Autor) |
 | `dashboard/manifest.json` | mountet `plugin_api.py` unter `/api/plugins/hermes-fokus/` |
 | `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher, XP-/Erfolgs-Logik |
-| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, drei Tabs (Fokus, Tagesübersicht, Fortschritt), Konfetti-Feier |
+| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, vier Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender), Konfetti-Feier |
 | `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-fokus/` (Linux/macOS) |
 | `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-fokus\`) |
 
@@ -41,9 +43,28 @@ Desktop-Hälfte wird über `desktop/plugin.js` geladen.
 | `POST /focus/complete` | VTODO auf COMPLETED, verbucht XP/Streak und liefert frische Erfolge zurück |
 | `POST /focus/defer` | ans Ende der Reihenfolge + Snooze, kein Statuswechsel |
 | `POST /focus/breakdown` | Freitext-Teilschritte merken (v1: keine KI) |
-| `GET /day` | Aufgaben + Termine des Tages, zeitsortiert |
+| `GET /day` | Aufgaben + Termine eines Tages, zeitsortiert — optional `?date=YYYY-MM-DD`, ohne den Parameter wie bisher heute |
+| `GET /month` | `?year=…&month=1–12`: pro Tag nur Zahlen (`tasksOpen`, `tasksCompleted`, `events`) fürs Monatsraster |
 | `GET /progress` | Level, XP, Streak und alle zehn Erfolge für den Fortschritts-Tab (braucht kein Nextcloud) |
 | `POST /reminder/check` | vom Desktop gepollt, sagt ob erinnert werden soll |
+
+## Kalender
+
+Der vierte Tab zeigt einen ganzen Monat als Raster (Montag zuerst). Jede
+Tageszelle trägt die Zahl und, falls dort etwas liegt, eine knappe Zeile wie
+„2 Aufgaben · 1 Termin"; ein kleiner Punkt in der Akzentfarbe steht für an
+diesem Tag erledigte Aufgaben. Leere Tage bleiben leer — keine Nullen, keine
+Balken. Ein Klick öffnet den Tag im Detail: Aufgaben und Termine in zwei
+getrennten Abschnitten, Aufgaben direkt mit „Erledigt"-Knopf inklusive
+derselben XP-Feier wie im Fokus-Tab.
+
+Der Überblick zeigt bewusst mehr als die Fokusansicht: auch Aufgaben, die
+gerade auf „Später" stehen, erscheinen im Raster und in der Tagesansicht.
+Snooze heißt „jetzt nicht vor die Nase", nicht „aus dem Kalender streichen".
+
+**Einschränkung:** Aufgaben **ohne Fälligkeitsdatum** tauchen im Kalender nicht
+auf — sie haben keinen Tag, an den sie gehören, und leben im Fokus-Eingang.
+Nur was in Nextcloud ein `DUE` trägt, landet im Raster.
 
 ## Installation
 
