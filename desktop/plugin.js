@@ -66,6 +66,7 @@ function makeApi(ctx) {
     getSettings: () => call('/settings', 'GET'),
     saveSettings: (host, username, appPassword, calendarName) =>
       call('/settings', 'POST', { host, username, appPassword, calendarName }),
+    installCaldav: () => call('/setup/install-caldav', 'POST', {}),
     // Zweites Argument optional: { due: 'YYYY-MM-DD' } fuers '+ Aufgabe an
     // diesem Tag' aus dem Kalender. Weggelassen bleibt das Verhalten wie vorher.
     capture: (title, opts) =>
@@ -527,6 +528,9 @@ function SetupView({ api, onDone }) {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [caldavMissing, setCaldavMissing] = useState(false)
+  const [caldavReason, setCaldavReason] = useState('')
+  const [installingCaldav, setInstallingCaldav] = useState(false)
   const hostRef = useRef(null)
 
   // Kein Zwang, dem Kalender hinterherzuklicken: Fokus liegt sofort im ersten
@@ -535,6 +539,37 @@ function SetupView({ api, onDone }) {
     const node = hostRef.current
     if (node && typeof node.focus === 'function') node.focus()
   }, [])
+
+  // Frueher installierte das Backend die 'caldav'-Bibliothek beim ersten
+  // Laden still selbst nach, ganz ohne dass hier je etwas zu sehen war. Jetzt
+  // zeigt der Status es an, und hier steht der Knopf dafuer - kein Klick,
+  // keine Installation.
+  useEffect(() => {
+    let lebendig = true
+    api
+      .status()
+      .then(antwort => {
+        if (!lebendig) return
+        setCaldavMissing(antwort && antwort.caldav === false)
+        setCaldavReason((antwort && antwort.reason) || '')
+      })
+      .catch(() => {})
+    return () => { lebendig = false }
+  }, [])
+
+  const installCaldav = () => {
+    if (installingCaldav) return
+    setInstallingCaldav(true)
+    setError('')
+    api
+      .installCaldav()
+      .then(() => {
+        setCaldavMissing(false)
+        setCaldavReason('')
+      })
+      .catch(err => setError(describeError(err)))
+      .then(() => setInstallingCaldav(false), () => setInstallingCaldav(false))
+  }
 
   const submit = () => {
     if (busy) return
@@ -583,6 +618,32 @@ function SetupView({ api, onDone }) {
         children:
           'Nextcloud bleibt die alleinige Wahrheit für Aufgaben und Termine. Die Zugangsdaten landen lokal in einer eigenen Datei — niemals in Hermes’ eigener config.yaml.'
       }),
+      caldavMissing
+        ? jsxs('div', {
+            style: {
+              borderRadius: '10px',
+              border: '1px solid var(--ui-stroke-secondary)',
+              padding: '12px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px'
+            },
+            children: [
+              jsx('div', {
+                style: { fontSize: '0.82rem', color: 'var(--ui-text-secondary)' },
+                children: 'Für die Verbindung fehlt noch eine kleine Python-Bibliothek (caldav).'
+              }),
+              caldavReason
+                ? jsx('div', { style: { fontSize: '0.72rem', color: 'var(--ui-text-quaternary)' }, children: caldavReason })
+                : null,
+              jsx(Button, {
+                onClick: installCaldav,
+                disabled: installingCaldav,
+                children: installingCaldav ? 'Wird installiert…' : 'Bibliothek installieren'
+              })
+            ]
+          }, 'caldav-hinweis')
+        : null,
       jsx(Input, {
         ref: hostRef,
         autoFocus: true,
@@ -607,7 +668,7 @@ function SetupView({ api, onDone }) {
       error ? jsx(Notice, { tone: 'quiet', children: error }) : null,
       jsx(Button, {
         onClick: submit,
-        disabled: busy,
+        disabled: busy || caldavMissing,
         children: busy ? 'Verbinde…' : 'Verbinden'
       }),
       jsx('div', {

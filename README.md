@@ -58,6 +58,7 @@ Desktop-Hälfte wird über `desktop/plugin.js` geladen.
 | Route | Zweck |
 |---|---|
 | `GET /status` | Ist Nextcloud konfiguriert und `caldav` installiert? |
+| `POST /setup/install-caldav` | installiert `caldav` jetzt aktiv (Klick im Einrichtungs-Dialog, kein Auto-Install mehr) |
 | `GET /settings` | aktueller Verbindungsstand fürs Einrichtungs-Formular (nie das Passwort) |
 | `POST /settings` | Zugangsdaten testen und **nur bei Erfolg** speichern |
 | `POST /capture` | Brain-Dump-Text → neues VTODO |
@@ -152,12 +153,15 @@ Desktop **komplett** neu starten (nicht nur das Fenster neu laden) und in
 **Capabilities → Plugins** den Eintrag „Fokus" einschalten. Wird nur
 `desktop/plugin.js` geändert, reicht ⌘K → **Reload desktop plugins**.
 
-Die Python-Bibliothek `caldav` ist in Hermes' venv nicht vorinstalliert — das
-Backend installiert sie beim ersten Laden **selbst nach**, über den bereits
-laufenden Python-Interpreter (`sys.executable -m pip`). Das funktioniert
-identisch unter Linux, macOS und Windows, ohne Shell-Kommando und ohne
-manuellen Schritt. Nur wenn das scheitert (kein Internet, schreibgeschütztes
-venv), meldet `/status` den genauen Grund inklusive Fallback-Befehl.
+Die Python-Bibliothek `caldav` ist in Hermes' venv nicht vorinstalliert. Das
+Backend installiert sie **nicht mehr automatisch** beim Laden (früherer
+Stand: stiller `pip install` bei jedem Modul-Import, ohne dass Nutzer das je
+zu sehen bekamen) — stattdessen zeigt der Einrichtungs-Dialog einen
+„Bibliothek installieren"-Knopf, sobald `/status` `caldav: false` meldet.
+Erst ein Klick löst `sys.executable -m pip install caldav` aus, über den
+bereits laufenden Python-Interpreter, identisch unter Linux, macOS und
+Windows. Schlägt das fehl (kein Internet, schreibgeschütztes venv), zeigt
+`/status` den genauen Grund inklusive Fallback-Befehl für die Kommandozeile.
 
 ## Einrichtung
 

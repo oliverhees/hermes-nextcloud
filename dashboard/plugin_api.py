@@ -44,26 +44,32 @@ MAX_TITLE_LEN = 500
 MAX_SUBTASKS = 20
 
 
-def _ensure_caldav():
-    """caldav ist in Hermes' venv nicht vorinstalliert. Statt Oliver (oder wer
-    auch immer das Plugin installiert) auf einen manuellen pip-Befehl zu
-    verweisen, installiert dieses Modul die Bibliothek beim ersten Laden selbst
-    nach - ueber `sys.executable -m pip`, also denselben Interpreter, in dem
-    Hermes gerade laeuft. Das funktioniert identisch unter Linux, macOS und
-    Windows, weil es kein Shell-Kommando ist, sondern ein Python-Unterprozess
-    des bereits laufenden Interpreters.
+def _detect_caldav():
+    """Nur PRUEFEN, ob 'caldav' schon da ist - installiert NICHTS.
 
-    Schlaegt die Installation fehl (kein Internet, schreibgeschuetztes venv,
-    kein pip), gibt die Funktion sauber (None, Fehlertext) zurueck statt den
-    Modul-Import zu sprengen - jede Route meldet das dann als 503 mit Grund.
+    Frueher installierte dieses Modul die Bibliothek beim ersten Laden still
+    selbst nach (sys.executable -m pip install caldav), ohne dass der Nutzer
+    das je zu sehen bekam: jeder Gateway-Start, der das Plugin importiert,
+    haette unbemerkt in das Hermes-eigene venv geschrieben. Die Installation
+    braucht jetzt eine ausdrueckliche Nutzeraktion - siehe install_caldav()
+    und die Route POST /setup/install-caldav weiter unten.
     """
     try:
         import caldav as caldav_module
 
         return caldav_module, ""
-    except Exception:
-        pass  # nicht vorhanden - unten selbst nachinstallieren
+    except Exception as exc:
+        return None, str(exc)
 
+
+def install_caldav() -> tuple[bool, str]:
+    """Installiert 'caldav' jetzt aktiv - nur aus einer Route heraus
+    aufgerufen, die der Nutzer selbst ausgeloest hat (Einrichtungs-Dialog,
+    Knopf 'Bibliothek installieren'). Aktualisiert _caldav/_CALDAV_ERROR bei
+    Erfolg sofort, damit die naechste Anfrage in derselben Laufzeit ohne
+    Neustart funktioniert.
+    """
+    global _caldav, _CALDAV_ERROR
     try:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "--quiet", "caldav"],
@@ -74,24 +80,25 @@ def _ensure_caldav():
     except Exception as exc:  # pragma: no cover - netzwerk-/umgebungsabhaengig
         detail = getattr(exc, "stderr", None)
         detail_text = detail.decode("utf-8", "replace")[-400:] if detail else str(exc)
-        return None, f"automatische Installation fehlgeschlagen: {detail_text}"
+        return False, f"Installation fehlgeschlagen: {detail_text}"
 
     try:
         importlib.invalidate_caches()
         import caldav as caldav_module
 
-        return caldav_module, ""
+        _caldav, _CALDAV_ERROR = caldav_module, ""
+        return True, ""
     except Exception as exc:  # pragma: no cover - umgebungsabhaengig
-        return None, f"nach Installation weiterhin nicht importierbar: {exc}"
+        return False, f"Nach der Installation weiterhin nicht importierbar: {exc}"
 
 
-_caldav, _CALDAV_ERROR = _ensure_caldav()
+_caldav, _CALDAV_ERROR = _detect_caldav()
 
 
 def _caldav_missing_detail() -> str:
     return (
-        "Die Python-Bibliothek 'caldav' fehlt und die automatische Installation "
-        f"beim Laden ist gescheitert ({_CALDAV_ERROR}). Manuell nachholen: "
+        "Die Python-Bibliothek 'caldav' fehlt noch. Im Einrichtungs-Dialog auf "
+        "'Bibliothek installieren' klicken, oder manuell: "
         f"{sys.executable} -m pip install caldav - dann Hermes neu starten."
     )
 
@@ -1202,6 +1209,21 @@ async def status() -> dict:
         "calendar": cfg["calendar_name"],
         "host": cfg["url"],
     }
+
+
+@router.post("/setup/install-caldav")
+async def setup_install_caldav() -> dict:
+    """Installiert die Python-Bibliothek 'caldav' jetzt aktiv - nur erreichbar
+    ueber einen ausdruecklichen Klick im Einrichtungs-Dialog (siehe
+    install_caldav() oben: das Modul installiert sich seit dieser Version
+    NICHT mehr still beim Laden). Schreibt in Hermes' eigenes venv, das ist
+    der Grund fuer die explizite Zustimmung statt eines automatischen Laufs."""
+    if _caldav is not None:
+        return {"ok": True, "already": True}
+    ok, fehler = install_caldav()
+    if not ok:
+        raise HTTPException(status_code=500, detail=fehler)
+    return {"ok": True, "already": False}
 
 
 @router.get("/settings")
