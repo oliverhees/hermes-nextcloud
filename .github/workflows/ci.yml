@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repo auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Backend-Abhaengigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Backend-Syntax pruefen
+        run: python3 -m py_compile dashboard/plugin_api.py
+
+      - name: Backend-Tests
+        run: python3 -m pytest tests/ -v
+
+      - name: Node einrichten
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Desktop-Syntax pruefen
+        run: node --check desktop/plugin.js
+
+      - name: deploy.sh Syntax pruefen
+        run: bash -n deploy.sh

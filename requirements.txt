@@ -1,0 +1,11 @@
+# Laufzeit-Abhaengigkeiten des Backends (dashboard/plugin_api.py).
+#
+# fastapi/starlette: von Hermes selbst mitgebracht (das Dashboard mountet
+# jeden Plugin-Router in denselben Prozess) - hier nur benannt, damit Tests
+# und CI ein eigenes, reproduzierbares venv aufbauen koennen, ohne einen
+# echten Hermes-Checkout zu brauchen.
+fastapi>=0.100
+caldav>=1.3
+
+# Nur fuer Tests/CI, nicht zur Laufzeit noetig.
+pytest>=8.0
