@@ -127,7 +127,9 @@ function makeApi(ctx) {
     talkRooms: () => call('/talk/rooms', 'GET'),
     talkMessages: token => call(`/talk/rooms/${token}/messages`, 'GET'),
     talkSend: (token, message) => call(`/talk/rooms/${token}/messages`, 'POST', { message }),
-    mailAccounts: () => call('/mail/accounts', 'GET')
+    mailAccounts: () => call('/mail/accounts', 'GET'),
+    updateStatus: () => call('/update/status', 'GET'),
+    updateRun: () => call('/update/run', 'POST', {})
   }
 }
 
@@ -810,6 +812,68 @@ function MailAccountsBlock({ api }) {
   })
 }
 
+// Update-Knopf: nur sichtbar, wenn ueber Git installiert UND eine neuere
+// Version am Remote liegt. Aktualisieren schreibt Code auf der Platte -
+// deshalb hinter ConfirmDialog, gleiches Prinzip wie jede andere
+// Schreibaktion in diesem Plugin. Nach dem Klick bleibt das Backend auf
+// dem alten Stand, bis Hermes komplett neu startet (Python laedt sich
+// nicht von selbst neu) - das sagt die Erfolgsmeldung explizit.
+function UpdateBlock({ api }) {
+  const [status, setStatus] = useState(null)
+  const [pendingUpdate, setPendingUpdate] = useState(false)
+  const [result, setResult] = useState(null)
+
+  useEffect(() => {
+    api.updateStatus().then(setStatus).catch(() => setStatus(null))
+  }, [])
+
+  if (!status || !status.gitInstall || !status.updateAvailable) return null
+
+  const runUpdate = () =>
+    api
+      .updateRun()
+      .then(() => {
+        setResult('ok')
+        return api.updateStatus()
+      })
+      .then(setStatus)
+      .catch(error => {
+        setResult(describeError(error))
+        throw error
+      })
+
+  return jsxs('div', {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '8px',
+      fontSize: '0.78rem',
+      color: 'var(--ui-text-primary)'
+    },
+    children: [
+      jsx('span', {
+        children: result === 'ok'
+          ? 'Aktualisiert — Hermes komplett neu starten, damit das Backend es lädt.'
+          : `Update verfügbar (${status.behindBy} Commit${status.behindBy === 1 ? '' : 's'} zurück).`
+      }),
+      result !== 'ok'
+        ? jsx(Button, { variant: 'default', onClick: () => setPendingUpdate(true), children: 'Aktualisieren' })
+        : null,
+      pendingUpdate
+        ? jsx(ConfirmDialog, {
+            open: true,
+            onClose: () => setPendingUpdate(false),
+            title: 'Plugin aktualisieren?',
+            description: 'Lädt die neueste Version per Git herunter und ersetzt die lokalen Dateien. Hermes muss danach komplett neu gestartet werden.',
+            confirmLabel: 'Aktualisieren',
+            onConfirm: runUpdate
+          })
+        : null
+    ]
+  })
+}
+
 function SettingsPanel({ ctx, api, adhsMode, onChangeAdhsMode }) {
   return jsxs('div', {
     style: {
@@ -820,6 +884,7 @@ function SettingsPanel({ ctx, api, adhsMode, onChangeAdhsMode }) {
       gap: '6px'
     },
     children: [
+      jsx(UpdateBlock, { api }),
       jsx(MailAccountsBlock, { api }),
       jsxs('label', {
         style: {

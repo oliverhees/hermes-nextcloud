@@ -23,10 +23,13 @@ mit Zugriff auf eine echte Instanz, nicht Teil dieses Batches.
 Sehr wohl abgedeckt: die reine Python-Logik der neuen Workspace-Sync- und
 Datei-Pfad-Validierung (_workspace_dir, _clean_dav_segment) - die braucht
 kein Netzwerk und haette bei einem Fehler (z.B. Pfad-Traversal) echten
-Schaden angerichtet.
+Schaden angerichtet. Ebenso der fruehe Ausstieg von /update/status ohne
+.git-Ordner (kein echter git-Aufruf noetig) - der eigentliche git-fetch-Pfad
+selbst bleibt ungetestet, siehe oben.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -266,6 +269,24 @@ class WorkspacePathValidationTest(unittest.TestCase):
         api = load_api_module()
         self.assertEqual(api._clean_dav_segment("Ordner/Datei.txt", field="test"), "Ordner/Datei.txt")
         self.assertEqual(api._clean_dav_segment("/Ordner/", field="test"), "Ordner")
+
+
+class UpdateStatusTest(unittest.TestCase):
+    def test_ohne_git_ordner_kein_update_check(self):
+        api = load_api_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            api.PLUGIN_ROOT = Path(tmp)
+            result = asyncio.run(api.update_status())
+        self.assertFalse(result["gitInstall"])
+        self.assertFalse(result["updateAvailable"])
+
+    def test_update_run_lehnt_ohne_git_ordner_ab(self):
+        api = load_api_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            api.PLUGIN_ROOT = Path(tmp)
+            with self.assertRaises(api.HTTPException) as ctx:
+                asyncio.run(api.update_run())
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 if __name__ == "__main__":

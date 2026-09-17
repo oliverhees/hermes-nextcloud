@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Kopiert hermes-nextcloud nach ~/.hermes/plugins/hermes-nextcloud/ (der Live-Ort, den
-# Hermes' Auto-Update NICHT anfasst — siehe README.md).
+# NUR fuer lokale Entwicklung. Kopiert hermes-nextcloud nach
+# ~/.hermes/plugins/hermes-nextcloud/ - erzeugt dabei KEINEN .git-Ordner,
+# der Aktualisieren-Knopf in den Plugin-Einstellungen bleibt deshalb
+# unsichtbar. Fuer eine echte Installation mit Update-Unterstuetzung siehe
+# README.md -> "Installation" (Hermes Settings -> Plugins -> Install from Git).
 #
 # Nutzung: ./deploy.sh
 set -euo pipefail

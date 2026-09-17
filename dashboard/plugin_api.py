@@ -2480,3 +2480,88 @@ async def list_mail_accounts() -> dict:
     return {
         "accounts": [{"id": a.get("id"), "email": a.get("email") or ""} for a in accounts]
     }
+
+
+# ---------------------------------------------------------------- Update-Check
+#
+# Nur relevant, wenn dieses Plugin ueber Hermes' eigenes "Install from Git"
+# installiert wurde (git-Checkout unter $HERMES_HOME/plugins/hermes-nextcloud/,
+# .git-Ordner vorhanden) statt ueber deploy.sh (reines Datei-Kopieren, kein
+# .git). __file__ liegt bei einer echten Installation unter
+# <plugin-root>/dashboard/plugin_api.py - zwei Ebenen hoch ist die Wurzel des
+# Git-Checkouts, unabhaengig von HERMES_HOME-Konfigurationsdetails.
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+GIT_TIMEOUT_SECONDS = 20
+
+
+def _git(args: list[str], *, timeout: int = GIT_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(PLUGIN_ROOT), *args],
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+@router.get("/update/status")
+async def update_status() -> dict:
+    if not (PLUGIN_ROOT / ".git").exists():
+        return {
+            "gitInstall": False,
+            "updateAvailable": False,
+            "hint": "Nicht ueber Git installiert (vermutlich per deploy.sh kopiert) - "
+            "kein automatischer Update-Check moeglich.",
+        }
+
+    try:
+        fetch = _git(["fetch", "--quiet"])
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {"gitInstall": True, "updateAvailable": False, "error": f"git fetch fehlgeschlagen: {exc}"}
+    if fetch.returncode != 0:
+        detail = fetch.stderr.decode("utf-8", "replace").strip()[-300:]
+        return {"gitInstall": True, "updateAvailable": False, "error": f"git fetch fehlgeschlagen: {detail}"}
+
+    count = _git(["rev-list", "HEAD..@{u}", "--count"])
+    if count.returncode != 0:
+        # Kein Upstream-Tracking konfiguriert (z.B. abgetrennter HEAD nach
+        # gepinntem Install) - kein Fehler, nur kein Vergleich moeglich.
+        return {
+            "gitInstall": True,
+            "updateAvailable": False,
+            "hint": "Kein Upstream-Branch konfiguriert - vermutlich auf einen "
+            "festen Commit gepinnt installiert.",
+        }
+    try:
+        behind_by = int(count.stdout.decode("utf-8", "replace").strip() or "0")
+    except ValueError:
+        behind_by = 0
+
+    revision = _git(["rev-parse", "--short", "HEAD"])
+    current_revision = revision.stdout.decode("utf-8", "replace").strip() if revision.returncode == 0 else ""
+
+    return {
+        "gitInstall": True,
+        "updateAvailable": behind_by > 0,
+        "behindBy": behind_by,
+        "currentRevision": current_revision,
+    }
+
+
+@router.post("/update/run")
+async def update_run() -> dict:
+    if not (PLUGIN_ROOT / ".git").exists():
+        raise HTTPException(status_code=400, detail="Nicht ueber Git installiert, kann nicht aktualisiert werden.")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "hermes_cli.main", "plugins", "update", PLUGIN_ID],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise HTTPException(status_code=502, detail=f"Update-Befehl fehlgeschlagen: {exc}") from exc
+    output = (result.stdout + result.stderr).decode("utf-8", "replace").strip()
+    if result.returncode != 0:
+        raise HTTPException(status_code=502, detail=f"Update fehlgeschlagen: {output[-500:]}")
+    return {"ok": True, "output": output}

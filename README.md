@@ -59,7 +59,7 @@ verloren". Ein ausgelassener Tag setzt den Streak still zurück.
 | `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher, XP-/Erfolgs-Logik |
 | `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, elf Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender, Notizen, Deck, Kontakte, Dateien, Formulare, Talk, Workspace-Sync), Konfetti-Feier, Drag-and-Drop, Inline-Formulare, Bestätigungsdialoge, AIIANER-Footer/Über-Block |
 | `desktop/brand.js` | reine Kopiervorlage für die AIIANER-Designtoken (Farbe/URL) — wird von `plugin.js` NICHT importiert, siehe Kommentar in der Datei |
-| `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-nextcloud/` (Linux/macOS) |
+| `deploy.sh` | nur für lokale Entwicklung: kopiert alles nach `~/.hermes/plugins/hermes-nextcloud/` (Linux/macOS), kein Git-Checkout, kein Update-Knopf |
 | `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-nextcloud\`) |
 
 `dashboard/manifest.json` trägt bewusst **kein** `tab`- und kein `entry`-Feld.
@@ -153,6 +153,8 @@ einen Tag gibt ihnen eine Fälligkeit.
 | `GET /mail/accounts` | verbundene Mail-Konten auflisten, nur lesen — **Beta, nur ein Endpunkt, kein Nachrichten-Zugriff** |
 | `GET /workspace/files?path=` | lokale Dateien im übergebenen Ordner auflisten |
 | `POST /workspace/sync` | ausgewählte lokale Dateien zu einem Nextcloud-Zielordner hochladen |
+| `GET /update/status` | prüft per `git fetch`, ob eine neuere Version am Remote liegt (nur bei Git-Installation) |
+| `POST /update/run` | ruft `hermes plugins update hermes-nextcloud` auf (Frontend fragt vorher per Bestätigungsdialog) |
 
 Notizen und Deck brauchen die jeweilige Nextcloud-App; ist sie nicht
 installiert, zeigt der Tab einen ruhigen Hinweis statt eines Fehlers. Kontakte
@@ -187,23 +189,48 @@ Abbruch.
 
 ## Installation
 
-**Linux/macOS:**
+**Empfohlener Weg: über Hermes selbst, per Git.**
+
+1. Öffne in Hermes **Settings → Plugins → Install from Git**.
+2. Trage dieses Repository ein:
+
+   ```text
+   https://github.com/oliverhees/hermes-nextcloud
+   ```
+
+3. Prüfe die angezeigten Plugin-Inhalte und installiere das Plugin.
+4. Hermes Desktop **komplett** neu starten (nicht nur das Fenster neu
+   laden) und in **Capabilities → Plugins** den Eintrag „Fokus" einschalten.
+
+Dieser Weg installiert das Plugin als echten Git-Checkout — nur dann
+funktioniert der **Aktualisieren**-Knopf in den Plugin-Einstellungen (siehe
+„Update" unten). Ohne `--ref`/gepinnte Revision bleibt der Checkout auf dem
+`main`-Branch, Hermes' eigener `hermes plugins update`-Befehl (den unser
+Aktualisieren-Knopf im Hintergrund aufruft) funktioniert dann direkt.
+
+<details>
+<summary>Alternative für lokale Entwicklung: deploy.sh/deploy.ps1 (kein Update-Knopf)</summary>
 
 ```bash
-./deploy.sh
+./deploy.sh       # Linux/macOS
 ```
-
-**Windows (PowerShell):**
 
 ```powershell
-.\deploy.ps1
+.\deploy.ps1      # Windows
 ```
 
-Beide Skripte kopieren identisch nach `$HERMES_HOME/plugins/hermes-nextcloud/`
-(Windows-Default: `%LOCALAPPDATA%\hermes`, sonst `~/.hermes`). Danach Hermes
-Desktop **komplett** neu starten (nicht nur das Fenster neu laden) und in
-**Capabilities → Plugins** den Eintrag „Fokus" einschalten. Wird nur
-`desktop/plugin.js` geändert, reicht ⌘K → **Reload desktop plugins**.
+Beide Skripte **kopieren** Dateien nach `$HERMES_HOME/plugins/hermes-nextcloud/`
+(Windows-Default: `%LOCALAPPDATA%\hermes`, sonst `~/.hermes`) — kein
+`.git`-Ordner entsteht dabei, der Aktualisieren-Knopf bleibt deshalb
+unsichtbar (siehe `/update/status`). Gedacht für schnelle lokale
+Iteration bei der Plugin-Entwicklung selbst, nicht als Endnutzer-Weg.
+
+</details>
+
+Nach jeder Installation/jedem Update gilt: Wird nur `desktop/plugin.js`
+geändert, reicht ⌘K → **Reload desktop plugins**. Ändert sich
+`dashboard/plugin_api.py`, braucht es einen echten Neustart — Python-Module
+laden sich nicht von selbst neu.
 
 Die Python-Bibliothek `caldav` ist in Hermes' venv nicht vorinstalliert. Das
 Backend installiert sie **nicht mehr automatisch** beim Laden (früherer
@@ -214,6 +241,24 @@ Erst ein Klick löst `sys.executable -m pip install caldav` aus, über den
 bereits laufenden Python-Interpreter, identisch unter Linux, macOS und
 Windows. Schlägt das fehl (kein Internet, schreibgeschütztes venv), zeigt
 `/status` den genauen Grund inklusive Fallback-Befehl für die Kommandozeile.
+
+## Update
+
+Nur sichtbar, wenn per „Install from Git" installiert (siehe oben) **und**
+eine neuere Version am Remote liegt: ein Hinweis mit Commit-Abstand plus
+ein **Aktualisieren**-Knopf erscheint in den Plugin-Einstellungen
+(⚙-Schalter in der Tab-Leiste). Der Klick ruft im Hintergrund
+`hermes plugins update hermes-nextcloud` auf — Hermes' eigenen, offiziellen
+Mechanismus (Git-Pull, Bytecode-Aufräumen, erneuter Sicherheits-Scan,
+Nachfrage bei neuen Capabilities), kein Eigenbau. Hinter einem
+Bestätigungsdialog, weil es Dateien auf der Platte ersetzt. Genau wie bei
+jeder Backend-Änderung: die Desktop-Oberfläche lädt automatisch neu
+(Hot-Reload), das Backend braucht danach einen echten Neustart.
+
+Der Check selbst (`GET /update/status`) läuft `git fetch` gegen das
+Plugin-Verzeichnis und vergleicht den lokalen Stand mit dem Remote — kein
+Hintergrund-Timer, die Prüfung passiert, wenn die Einstellungen geöffnet
+werden.
 
 ## Einrichtung
 
@@ -294,11 +339,14 @@ Hermes-Plugins mit eigenem "Security notes"-Abschnitt:
 - **Auth:** ein einziges Nextcloud-App-Passwort (siehe „Einrichtung"), HTTP
   Basic Auth, für ALLE Bereiche einschließlich Talk/Mail. Kein OAuth-Flow,
   kein zusätzlicher Zugangsdaten-Speicher pro Funktionsbereich.
-- **Lokale Prozessaufrufe:** ein einziger `subprocess.run` (Installation der
-  `caldav`-Bibliothek, ausschließlich über eine feste Argument-Liste mit
-  `sys.executable -m pip install caldav`, nie `shell=True`, nie mit
-  Nutzereingabe zusammengesetzt), nur nach explizitem Klick im
-  Einrichtungs-Dialog, nie automatisch beim Laden.
+- **Lokale Prozessaufrufe:** ausschließlich feste Argument-Listen, nie
+  `shell=True`, nie mit Nutzereingabe zusammengesetzt: `pip install caldav`
+  (nur nach Klick im Einrichtungs-Dialog), `git fetch`/`git rev-list`/
+  `git rev-parse` gegen das eigene Plugin-Verzeichnis (Update-Check, ohne
+  Nutzer-Interaktion beim Öffnen der Einstellungen, verändert nichts),
+  `hermes plugins update hermes-nextcloud` (nur nach Klick + Bestätigungs-
+  dialog — ruft Hermes' eigenen, offiziellen Update-Mechanismus auf, kein
+  Eigenbau, siehe „Update" oben).
 - **Lokaler Dateizugriff (neu, Workspace-Sync):** das Backend liest Dateien
   ausschließlich aus dem Ordner, den Hermes selbst als aktive Sitzung
   meldet (`host.state.cwd`), nie aus einem frei eingegebenen Pfad. Kein

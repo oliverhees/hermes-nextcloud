@@ -1,4 +1,7 @@
-# Kopiert hermes-nextcloud nach $HERMES_HOME\plugins\hermes-nextcloud\ unter Windows.
+# NUR fuer lokale Entwicklung. Kopiert hermes-nextcloud nach
+# $HERMES_HOME\plugins\hermes-nextcloud\ unter Windows - kein .git-Ordner,
+# kein Aktualisieren-Knopf (siehe README.md -> "Installation" fuer den
+# empfohlenen Weg mit Update-Unterstuetzung).
 # Windows-Pendant zu deploy.sh - selbe Kopierlogik, weil PowerShell hier die
 # einzige Shell ist, die man ohne WSL/Git-Bash voraussetzen darf.
 #
