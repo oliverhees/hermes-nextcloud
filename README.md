@@ -17,10 +17,18 @@ wird "Kalender" — die Capture-Leiste (Brain-Dump) bleibt in jedem Modus da,
 das ist generisch nützliche Schnellerfassung, kein ADHS-exklusives Feature.
 
 Dazu vier weitere Nextcloud-Bereiche als eigene Tabs: **Notizen**, **Deck**
-(Kanban, read-only in v1), **Kontakte**, **Dateien** — auf Olivers Instanz
-sind aktuell nur Kontakte und Dateien tatsächlich installiert; Notizen/Deck
-zeigen einen ruhigen "App nicht verfügbar"-Hinweis statt eines Fehlers, sobald
-die jeweilige Nextcloud-App fehlt.
+(Kanban, Karten lassen sich zwischen Stacks verschieben — hinter einem
+Bestätigungsdialog, siehe unten), **Kontakte**, **Dateien** — auf Olivers
+Instanz sind aktuell nur Kontakte und Dateien tatsächlich installiert;
+Notizen/Deck zeigen einen ruhigen "App nicht verfügbar"-Hinweis statt eines
+Fehlers, sobald die jeweilige Nextcloud-App fehlt.
+
+**Schreibaktionen außerhalb des Kalenders laufen hinter einem
+Bestätigungsdialog** (Hermes' `ConfirmDialog`-Bauteil): anders als
+Termine/Aufgaben im Kalender-Tab (dort reicht der 6-Sekunden-Rückgängig-
+Hinweis, ein Dialog wäre dort reine Reibung) sind Deck-Karten-Verschiebungen
+und alles, was künftig in diesem Muster dazukommt, absichtlich einen Klick
+langsamer — bewusste Reibung gegen Fehlklicks bei selteneren Aktionen.
 
 Nextcloud (CalDAV) ist die alleinige Wahrheit für Titel, Termin und Status. Das
 Plugin legt daneben nur ADHS-Zusatzdaten ab: Fokus-Reihenfolge, Teilschritte,
@@ -44,7 +52,8 @@ verloren". Ein ausgelassener Tag setzt den Streak still zurück.
 | `plugin.yaml` | Agent-Hälfte (Name, Version, Autor) |
 | `dashboard/manifest.json` | mountet `plugin_api.py` unter `/api/plugins/hermes-nextcloud/` |
 | `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher, XP-/Erfolgs-Logik |
-| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, vier Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender mit Monat/Woche/Tag), Konfetti-Feier, Drag-and-Drop, Inline-Formulare |
+| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, vier Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender mit Monat/Woche/Tag), Konfetti-Feier, Drag-and-Drop, Inline-Formulare, AIIANER-Footer/Über-Block |
+| `desktop/brand.js` | reine Kopiervorlage für die AIIANER-Designtoken (Farbe/URL) — wird von `plugin.js` NICHT importiert, siehe Kommentar in der Datei |
 | `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-nextcloud/` (Linux/macOS) |
 | `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-nextcloud\`) |
 
@@ -124,14 +133,18 @@ einen Tag gibt ihnen eine Fälligkeit.
 | `PUT /notes/{id}` | Titel/Inhalt ändern |
 | `DELETE /notes/{id}` | Notiz löschen |
 | `GET /deck/boards` | Deck-Boards auflisten |
-| `GET /deck/boards/{id}` | Stacks + Karten eines Boards (read-only in v1) |
+| `GET /deck/boards/{id}` | Stacks + Karten eines Boards |
+| `PUT /deck/boards/{boardId}/stacks/{stackId}/cards/{cardId}` | Titel und/oder Fälligkeit einer Karte ändern |
+| `POST /deck/boards/{boardId}/stacks/{stackId}/cards/{cardId}/move` | Karte in einen anderen Stack verschieben (Frontend fragt vorher per Bestätigungsdialog) |
 | `GET /contacts` | Kontakte aus dem CardDAV-Adressbuch `contacts` (read-only) |
 | `GET /files?path=` | WebDAV-Verzeichnisinhalt (read-only, kein Download in v1) |
 
 Notizen und Deck brauchen die jeweilige Nextcloud-App; ist sie nicht
 installiert, zeigt der Tab einen ruhigen Hinweis statt eines Fehlers. Kontakte
 und Dateien brauchen nur CardDAV/WebDAV, die auf jeder Standard-Nextcloud-
-Instanz mitlaufen.
+Instanz mitlaufen. Deck-Schreibzugriff nutzt Nextclouds offizielle
+Deck-API (`docs/API.md` im `nextcloud/deck`-Repo) mit demselben
+App-Passwort wie alles andere hier — kein zusätzlicher Login.
 
 ## Installation
 
@@ -229,3 +242,27 @@ an.
 
 Nichts davon liegt im `~/.hermes/hermes-agent`-Checkout, also überlebt alles ein
 Hermes-Auto-Update.
+
+## Sicherheit
+
+Ehrlich benannt, statt unerwähnt zu lassen — nach dem Vorbild anderer
+Hermes-Plugins mit eigenem "Security notes"-Abschnitt:
+
+- **Netzwerkzugriffe:** ausschließlich zur selbst konfigurierten
+  Nextcloud-Instanz (CalDAV, CardDAV, WebDAV, OCS-REST für Notizen/Deck).
+  Keine Telemetrie, kein Aufruf irgendeines anderen Servers.
+- **Auth:** ein einziges Nextcloud-App-Passwort (siehe „Einrichtung"), HTTP
+  Basic Auth. Kein OAuth-Flow, kein zusätzlicher Zugangsdaten-Speicher pro
+  Funktionsbereich.
+- **Lokale Prozessaufrufe:** ein einziger `subprocess.run` (Installation der
+  `caldav`-Bibliothek, ausschließlich über eine feste Argument-Liste mit
+  `sys.executable -m pip install caldav`, nie `shell=True`, nie mit
+  Nutzereingabe zusammengesetzt), nur nach explizitem Klick im
+  Einrichtungs-Dialog, nie automatisch beim Laden.
+- **Schreibzugriffe:** auf Aufgaben/Termine (Kalender-Tab, mit
+  Rückgängig-Hinweis) und auf Deck-Karten (mit Bestätigungsdialog vor jeder
+  Aktion). Notizen haben volles CRUD. Kontakte und Dateien sind aktuell
+  read-only.
+- **`plugin.yaml`** deklariert bewusst kein `permissions`/`capabilities`-Feld
+  — entspricht der Konvention der offiziellen Hermes-Kataloger-Plugins,
+  keine Rechte über das Nötige hinaus anzumelden.

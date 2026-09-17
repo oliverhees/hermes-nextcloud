@@ -7,11 +7,17 @@ Gamification-Mathematik (XP/Level/Erfolge - direkt nutzersichtbar bei jedem
 erledigten Task) und den seit dieser Version expliziten caldav-Consent-Weg.
 
 Bewusst NICHT abgedeckt: die eigentlichen CalDAV-Schreibpfade (/events,
-/events/move, /focus/complete gegen einen echten Kalender) - das braucht
-entweder eine echte Nextcloud-Instanz oder ein sorgfaeltig gebautes Mock der
-caldav-Bibliothek, das hier bewusst nicht blind nachgebaut wird, um keine
-falsche Sicherheit vorzutaeuschen. Naechster Schritt fuer eine spaetere
-Runde, nicht Teil dieses Batches.
+/events/move, /focus/complete gegen einen echten Kalender) und - seit dem
+Deck-Schreibzugriff (17.09.2026) - ebenso /deck/.../cards/{id} und
+/deck/.../cards/{id}/move. Alle brauchen entweder eine echte Nextcloud-
+Instanz oder ein sorgfaeltig gebautes Mock der jeweiligen Bibliothek/HTTP-
+Antwort, das hier bewusst nicht blind nachgebaut wird, um keine falsche
+Sicherheit vorzutaeuschen. Die Deck-Endpunkte sind gegen die offizielle
+Nextcloud-Deck-API-Doku gebaut (docs/API.md im nextcloud/deck-Repo), aber
+NICHT live gegen eine echte Instanz verifiziert - das ist ausdruecklich
+offen, siehe README-Abschnitt "Sicherheit"/Verifikation im zugehoerigen
+Umsetzungsplan. Naechster Schritt fuer eine spaetere Runde, nicht Teil
+dieses Batches.
 """
 from __future__ import annotations
 

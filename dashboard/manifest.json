@@ -2,6 +2,6 @@
   "name": "hermes-nextcloud",
   "label": "Nextcloud",
   "description": "Nextcloud-Dashboard fuer Hermes Desktop, mit optionalem ADHS-Fokus-Modus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "api": "plugin_api.py"
 }

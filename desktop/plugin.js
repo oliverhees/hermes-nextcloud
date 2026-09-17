@@ -26,11 +26,24 @@ import {
   Input,
   Textarea,
   EmptyState,
+  ConfirmDialog,
   ROUTES_AREA,
   SIDEBAR_NAV_AREA,
   STATUSBAR_AREAS,
   PALETTE_AREA
 } from '@hermes/plugin-sdk'
+
+// AIIANER-Designtoken inline statt importiert: Hermes laedt plugin.js als
+// EINE Datei ueber eine Blob-URL (kein Mehrdatei-Bundling, siehe
+// runtime-loader.ts), ein './brand.js'-Import wuerde zur Laufzeit
+// fehlschlagen. brand.js existiert trotzdem als Datei - als Kopiervorlage
+// fuer den spaeteren Rollout auf andere AIIANER-Plugins, aber ungenutzt von
+// diesem Modul. Beide Stellen synchron halten, falls sich Marke/URL aendert.
+const BRAND = {
+  url: 'https://aiianer.de',
+  name: 'AIIANER',
+  tagline: 'KI zum Anwenden, nicht zum Hypen.'
+}
 
 const ID = 'hermes-nextcloud'
 const ROUTE = '/hermes-nextcloud'
@@ -97,6 +110,11 @@ function makeApi(ctx) {
     noteDelete: id => call(`/notes/${id}`, 'DELETE'),
     deckBoards: () => call('/deck/boards', 'GET'),
     deckBoard: id => call(`/deck/boards/${id}`, 'GET'),
+    deckCardMove: (boardId, stackId, cardId, targetStackId) =>
+      call(`/deck/boards/${boardId}/stacks/${stackId}/cards/${cardId}/move`, 'POST', {
+        targetStackId,
+        order: 0
+      }),
     contacts: () => call('/contacts', 'GET'),
     files: path => call(`/files?path=${encodeURIComponent(path || '')}`, 'GET')
   }
@@ -749,7 +767,7 @@ function Tabs({ value, onChange, adhsMode, onToggleSettings, settingsOpen }) {
   })
 }
 
-function SettingsPanel({ adhsMode, onChangeAdhsMode }) {
+function SettingsPanel({ ctx, adhsMode, onChangeAdhsMode }) {
   return jsxs('div', {
     style: {
       padding: '12px 16px',
@@ -781,6 +799,79 @@ function SettingsPanel({ adhsMode, onChangeAdhsMode }) {
         style: { fontSize: '0.74rem', color: 'var(--ui-text-tertiary)' },
         children:
           'Fügt Fokus- und Fortschritts-Tab hinzu: eine Aufgabe statt Liste, Brain-Dump-Erfassung, Gamification. Ausgeschaltet bleibt es beim reinen Nextcloud-Überblick.'
+      }),
+      jsx(AboutBlock, { ctx })
+    ]
+  })
+}
+
+// Branding-Stufe T2: nur hier (Einstellungen, aktiv aufgesucht) und im
+// Footer unten - nirgends in Hermes-nativen Chrome-Bereichen wie
+// Statusleiste/Popover.
+function AboutBlock({ ctx }) {
+  return jsxs('div', {
+    style: {
+      marginTop: '4px',
+      paddingTop: '8px',
+      borderTop: '1px solid var(--ui-stroke-secondary)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '8px'
+    },
+    children: [
+      jsx('span', {
+        style: { fontSize: '0.72rem', color: 'var(--ui-text-tertiary)' },
+        children: `${BRAND.name} — ${BRAND.tagline}`
+      }),
+      jsx('button', {
+        type: 'button',
+        onClick: () => ctx.os.openExternal(BRAND.url),
+        style: {
+          font: 'inherit',
+          fontSize: '0.72rem',
+          color: 'var(--ui-accent)',
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          cursor: 'pointer'
+        },
+        children: BRAND.url.replace('https://', '')
+      })
+    ]
+  })
+}
+
+// Ein Footer, einmal fuer alle eigenen Tabs (nicht pro Tab) - dezent, in
+// der Akzentfarbe, kein Bild, kein Rauschen im Alltag.
+function Footer({ ctx }) {
+  return jsxs('div', {
+    style: {
+      flexShrink: 0,
+      padding: '6px 16px',
+      borderTop: '1px solid var(--ui-stroke-secondary)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+      gap: '6px',
+      fontSize: '0.68rem',
+      color: 'var(--ui-text-quaternary)'
+    },
+    children: [
+      'gebaut von',
+      jsx('button', {
+        type: 'button',
+        onClick: () => ctx.os.openExternal(BRAND.url),
+        style: {
+          font: 'inherit',
+          fontWeight: 600,
+          color: 'var(--ui-accent)',
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          cursor: 'pointer'
+        },
+        children: BRAND.name
       })
     ]
   })
@@ -2579,6 +2670,18 @@ function DeckView({ api, setError }) {
   const [stacks, setStacks] = useState([])
   const [loading, setLoading] = useState(true)
   const [unavailable, setUnavailable] = useState(false)
+  // Kein Drag-and-Drop in v1 des Schreibzugriffs: ein Ziel-Stack per Auswahl
+  // plus Bestaetigungsdialog ist der bewusst gewaehlte, geringere Aufwand -
+  // Drag-and-Drop kann folgen, sobald sich das Grundmuster bewaehrt hat.
+  const [pendingMove, setPendingMove] = useState(null)
+
+  const reloadBoard = useCallback(() => {
+    if (boardId === null) return Promise.resolve()
+    return api
+      .deckBoard(boardId)
+      .then(data => setStacks((data && data.stacks) || []))
+      .catch(error => setError(describeError(error)))
+  }, [api, boardId, setError])
 
   useEffect(() => {
     api
@@ -2597,11 +2700,7 @@ function DeckView({ api, setError }) {
   }, [])
 
   useEffect(() => {
-    if (boardId === null) return
-    api
-      .deckBoard(boardId)
-      .then(data => setStacks((data && data.stacks) || []))
-      .catch(error => setError(describeError(error)))
+    reloadBoard()
   }, [boardId])
 
   if (unavailable) {
@@ -2626,7 +2725,7 @@ function DeckView({ api, setError }) {
   }
 
   return jsxs('div', {
-    style: { padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px', height: '100%', minHeight: 0 },
+    style: { padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px', height: '100%', minHeight: 0, position: 'relative' },
     children: [
       boards.length > 1
         ? jsxs('select', {
@@ -2662,22 +2761,77 @@ function DeckView({ api, setError }) {
             children: [
               jsx('div', { style: { fontWeight: 700, fontSize: '0.82rem', color: 'var(--ui-text-primary)' }, children: stack.title }),
               ...stack.cards.map(card =>
-                jsx('div', {
+                jsxs('div', {
                   style: {
                     border: '1px solid var(--ui-stroke-secondary)',
                     borderRadius: '8px',
                     padding: '8px 10px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
                     fontSize: '0.8rem',
                     color: 'var(--ui-text-secondary)',
                     background: 'var(--ui-bg-secondary)'
                   },
-                  children: card.title
+                  children: [
+                    jsx('span', { children: card.title }),
+                    stacks.length > 1
+                      ? jsxs('select', {
+                          value: '',
+                          onChange: event => {
+                            const targetStackId = Number(event.target.value)
+                            if (!targetStackId) return
+                            const target = stacks.find(s => s.id === targetStackId)
+                            setPendingMove({
+                              boardId,
+                              fromStackId: stack.id,
+                              cardId: card.id,
+                              cardTitle: card.title,
+                              targetStackId,
+                              targetStackTitle: target ? target.title : ''
+                            })
+                          },
+                          style: {
+                            font: 'inherit',
+                            fontSize: '0.72rem',
+                            padding: '2px 6px',
+                            borderRadius: '6px',
+                            border: '1px solid var(--ui-stroke-secondary)',
+                            background: 'var(--ui-bg-primary)',
+                            color: 'var(--ui-text-tertiary)'
+                          },
+                          children: [
+                            jsx('option', { value: '', children: 'Verschieben nach…' }),
+                            ...stacks
+                              .filter(s => s.id !== stack.id)
+                              .map(s => jsx('option', { value: s.id, children: s.title }, s.id))
+                          ]
+                        })
+                      : null
+                  ]
                 }, card.id)
               )
             ]
           }, stack.id)
         )
-      })
+      }),
+      pendingMove
+        ? jsx(ConfirmDialog, {
+            open: true,
+            onClose: () => setPendingMove(null),
+            title: 'Karte verschieben?',
+            description: `„${pendingMove.cardTitle}" nach „${pendingMove.targetStackTitle}" verschieben. Schreibt direkt in Nextcloud.`,
+            confirmLabel: 'Verschieben',
+            onConfirm: () =>
+              api
+                .deckCardMove(pendingMove.boardId, pendingMove.fromStackId, pendingMove.cardId, pendingMove.targetStackId)
+                .then(() => reloadBoard())
+                .catch(error => {
+                  setError(describeError(error))
+                  throw error
+                })
+          })
+        : null
     ]
   })
 }
@@ -2990,7 +3144,7 @@ function FokusPage({ ctx }) {
         onToggleSettings: () => setSettingsOpen(current => !current),
         settingsOpen
       }),
-      settingsOpen ? jsx(SettingsPanel, { adhsMode, onChangeAdhsMode: setAdhsMode }) : null,
+      settingsOpen ? jsx(SettingsPanel, { ctx, adhsMode, onChangeAdhsMode: setAdhsMode }) : null,
       error
         ? jsx('div', {
             style: { padding: '12px 16px' },
@@ -3032,7 +3186,8 @@ function FokusPage({ ctx }) {
                             onReloadWeek: () => loadWeek(weekStart),
                             setError
                           })
-      })
+      }),
+      jsx(Footer, { ctx })
     ]
   })
 }

@@ -1105,8 +1105,10 @@ def _notes_json(status: int, body: bytes, *, context: str) -> Any:
 
 # ---------------------------------------------------------------- Deck (Kanban)
 #
-# Read-only in v1 - Karten verschieben/anlegen braucht zusaetzliche
-# Board-Berechtigungspruefung, die den Rahmen dieses Baus sprengt.
+# Lesen (Boards/Stacks/Karten) plus Schreiben (Titel/Faelligkeit aendern,
+# Karte in einen anderen Stack verschieben) - Nextcloud prueft Board-
+# Berechtigungen serverseitig selbst, ein 403 von dort wird 1:1 als 502
+# durchgereicht statt hier dupliziert zu werden.
 
 DECK_BASE = "/index.php/apps/deck/api/v1.0"
 
@@ -1975,6 +1977,79 @@ async def get_board(board_id: int) -> dict:
             for s in stacks
         ]
     }
+
+
+@router.put("/deck/boards/{board_id}/stacks/{stack_id}/cards/{card_id}")
+async def update_deck_card(board_id: int, stack_id: int, card_id: int, body: dict) -> dict:
+    """Aendert Titel und/oder Faelligkeit einer Deck-Karte. Nextcloud verlangt
+    board_id UND stack_id im Pfad (nicht nur card_id) - beide kennt das
+    Frontend bereits, weil die Karte innerhalb eines geladenen Boards/Stacks
+    angezeigt wird. Alle Felder sind bei Nextcloud optional, hier ebenso -
+    nur mitgeschickte Felder werden veraendert."""
+    payload: dict = {}
+    title = (body or {}).get("title")
+    if title is not None:
+        payload["title"] = str(title).strip()[:255]
+    if "duedate" in (body or {}):
+        payload["duedate"] = body.get("duedate")
+    if not payload:
+        raise HTTPException(status_code=422, detail="Nichts zu aendern mitgeschickt.")
+    cfg = _config()
+    status, resp_body = _nc_request(
+        "PUT",
+        f"{DECK_BASE}/boards/{board_id}/stacks/{stack_id}/cards/{card_id}",
+        cfg,
+        headers={
+            "OCS-APIRequest": "true",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        body=json.dumps(payload).encode("utf-8"),
+    )
+    if status == 404:
+        raise _deck_unavailable()
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Karte nicht aenderbar (Status {status}).")
+    return {"ok": True}
+
+
+@router.post("/deck/boards/{board_id}/stacks/{stack_id}/cards/{card_id}/move")
+async def move_deck_card(board_id: int, stack_id: int, card_id: int, body: dict) -> dict:
+    """Verschiebt eine Karte in einen anderen Stack, per Nextcloud Decks
+    eigenem /reorder-Endpunkt (dokumentiert unter docs/API.md im
+    nextcloud/deck-Repo). 'order' ist bei Nextcloud Pflicht - ohne explizite
+    Angabe vom Frontend wandert die Karte an Position 0 (oben) im Zielstack,
+    das ist fuer 'Karte in einen anderen Stack ziehen' die sinnvollste
+    Voreinstellung."""
+    target_stack_raw = (body or {}).get("targetStackId")
+    if target_stack_raw is None:
+        raise HTTPException(status_code=422, detail="Feld 'targetStackId' fehlt.")
+    try:
+        target_stack_id = int(target_stack_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="'targetStackId' muss eine Zahl sein.")
+    order_raw = (body or {}).get("order", 0)
+    try:
+        order = int(order_raw)
+    except (TypeError, ValueError):
+        order = 0
+    cfg = _config()
+    status, resp_body = _nc_request(
+        "PUT",
+        f"{DECK_BASE}/boards/{board_id}/stacks/{stack_id}/cards/{card_id}/reorder",
+        cfg,
+        headers={
+            "OCS-APIRequest": "true",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        body=json.dumps({"stackId": target_stack_id, "order": order}).encode("utf-8"),
+    )
+    if status == 404:
+        raise _deck_unavailable()
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Karte nicht verschiebbar (Status {status}).")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- Kontakte-Route
