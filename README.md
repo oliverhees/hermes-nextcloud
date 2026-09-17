@@ -16,19 +16,24 @@ Ausgeschaltet verschwinden die Tabs "Fokus" und "Fortschritt", Startansicht
 wird "Kalender" — die Capture-Leiste (Brain-Dump) bleibt in jedem Modus da,
 das ist generisch nützliche Schnellerfassung, kein ADHS-exklusives Feature.
 
-Dazu vier weitere Nextcloud-Bereiche als eigene Tabs: **Notizen**, **Deck**
-(Kanban, Karten lassen sich zwischen Stacks verschieben — hinter einem
-Bestätigungsdialog, siehe unten), **Kontakte**, **Dateien** — auf Olivers
-Instanz sind aktuell nur Kontakte und Dateien tatsächlich installiert;
-Notizen/Deck zeigen einen ruhigen "App nicht verfügbar"-Hinweis statt eines
-Fehlers, sobald die jeweilige Nextcloud-App fehlt.
+Dazu sieben weitere Bereiche als eigene Tabs: **Notizen**, **Deck** (Kanban,
+Karten lassen sich zwischen Stacks verschieben), **Kontakte**, **Dateien**
+(umbenennen/verschieben möglich), **Formulare** (Nextcloud Forms
+beantworten), **Talk** (Räume lesen/schreiben, **Beta**), **Workspace-Sync**
+(lokale Dateien der aktuellen Hermes-Sitzung zu Nextcloud hochladen). Dazu,
+nur in den Einstellungen sichtbar: eine Liste verbundener **Mail-Konten**
+(read-only, **Beta**). Auf Olivers Instanz sind aktuell nur Kontakte und
+Dateien tatsächlich installiert; jeder Bereich zeigt einen ruhigen "App
+nicht verfügbar"-Hinweis statt eines Fehlers, sobald die jeweilige
+Nextcloud-App fehlt.
 
 **Schreibaktionen außerhalb des Kalenders laufen hinter einem
 Bestätigungsdialog** (Hermes' `ConfirmDialog`-Bauteil): anders als
 Termine/Aufgaben im Kalender-Tab (dort reicht der 6-Sekunden-Rückgängig-
-Hinweis, ein Dialog wäre dort reine Reibung) sind Deck-Karten-Verschiebungen
-und alles, was künftig in diesem Muster dazukommt, absichtlich einen Klick
-langsamer — bewusste Reibung gegen Fehlklicks bei selteneren Aktionen.
+Hinweis, ein Dialog wäre dort reine Reibung) sind Deck-Karten-Verschiebungen,
+Datei-Umbenennungen, Formular-Abgaben und Workspace-Uploads absichtlich
+einen Klick langsamer — bewusste Reibung gegen Fehlklicks bei selteneren,
+schwerer rückgängig zu machenden Aktionen.
 
 Nextcloud (CalDAV) ist die alleinige Wahrheit für Titel, Termin und Status. Das
 Plugin legt daneben nur ADHS-Zusatzdaten ab: Fokus-Reihenfolge, Teilschritte,
@@ -52,7 +57,7 @@ verloren". Ein ausgelassener Tag setzt den Streak still zurück.
 | `plugin.yaml` | Agent-Hälfte (Name, Version, Autor) |
 | `dashboard/manifest.json` | mountet `plugin_api.py` unter `/api/plugins/hermes-nextcloud/` |
 | `dashboard/plugin_api.py` | FastAPI-Router, CalDAV-Client, Anreicherungs-Speicher, XP-/Erfolgs-Logik |
-| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, vier Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender mit Monat/Woche/Tag), Konfetti-Feier, Drag-and-Drop, Inline-Formulare, AIIANER-Footer/Über-Block |
+| `desktop/plugin.js` | Desktop-UI: Route, Sidebar-Nav, Statusleiste, Palette, elf Tabs (Fokus, Tagesübersicht, Fortschritt, Kalender, Notizen, Deck, Kontakte, Dateien, Formulare, Talk, Workspace-Sync), Konfetti-Feier, Drag-and-Drop, Inline-Formulare, Bestätigungsdialoge, AIIANER-Footer/Über-Block |
 | `desktop/brand.js` | reine Kopiervorlage für die AIIANER-Designtoken (Farbe/URL) — wird von `plugin.js` NICHT importiert, siehe Kommentar in der Datei |
 | `deploy.sh` | kopiert alles nach `~/.hermes/plugins/hermes-nextcloud/` (Linux/macOS) |
 | `deploy.ps1` | dasselbe für Windows (`%LOCALAPPDATA%\hermes\plugins\hermes-nextcloud\`) |
@@ -138,13 +143,45 @@ einen Tag gibt ihnen eine Fälligkeit.
 | `POST /deck/boards/{boardId}/stacks/{stackId}/cards/{cardId}/move` | Karte in einen anderen Stack verschieben (Frontend fragt vorher per Bestätigungsdialog) |
 | `GET /contacts` | Kontakte aus dem CardDAV-Adressbuch `contacts` (read-only) |
 | `GET /files?path=` | WebDAV-Verzeichnisinhalt (read-only, kein Download in v1) |
+| `POST /files/move` | Datei umbenennen/verschieben (WebDAV MOVE, `Overwrite: F`) |
+| `GET /forms` | eigene Formulare auflisten |
+| `GET /forms/{id}` | ein Formular mit Fragen (Datei-Upload-Fragen werden markiert, aber nicht unterstützt) |
+| `POST /forms/{id}/submissions` | Antworten absenden |
+| `GET /talk/rooms` | Talk-Räume auflisten — **Beta, Auth nicht live verifiziert** |
+| `GET /talk/rooms/{token}/messages` | Nachrichten eines Raums (letzte 50, keine Systemmeldungen) — **Beta** |
+| `POST /talk/rooms/{token}/messages` | Nachricht senden — **Beta** |
+| `GET /mail/accounts` | verbundene Mail-Konten auflisten, nur lesen — **Beta, nur ein Endpunkt, kein Nachrichten-Zugriff** |
+| `GET /workspace/files?path=` | lokale Dateien im übergebenen Ordner auflisten |
+| `POST /workspace/sync` | ausgewählte lokale Dateien zu einem Nextcloud-Zielordner hochladen |
 
 Notizen und Deck brauchen die jeweilige Nextcloud-App; ist sie nicht
 installiert, zeigt der Tab einen ruhigen Hinweis statt eines Fehlers. Kontakte
 und Dateien brauchen nur CardDAV/WebDAV, die auf jeder Standard-Nextcloud-
-Instanz mitlaufen. Deck-Schreibzugriff nutzt Nextclouds offizielle
-Deck-API (`docs/API.md` im `nextcloud/deck`-Repo) mit demselben
-App-Passwort wie alles andere hier — kein zusätzlicher Login.
+Instanz mitlaufen. Deck- und Forms-Schreibzugriff nutzen Nextclouds
+offizielle, gut dokumentierte APIs (`docs/API.md` in den jeweiligen
+Nextcloud-Repos) mit demselben App-Passwort wie alles andere hier — kein
+zusätzlicher Login.
+
+**Talk und Mail sind als Beta markiert und ungetestet gegen eine echte
+Instanz.** Nextclouds eigene API-Dokumentation bestätigt für Talk das
+Auth-Modell nicht explizit (folgt vermutlich, aber unbestätigt, demselben
+App-Passwort-Muster wie der Rest), und die Mail-App-API ist insgesamt
+dünner dokumentiert als Deck/Forms/Talk (uneinheitliche URL-Präfixe
+zwischen den eigenen Controllern der App). Deshalb bei Mail bewusst nur
+der am klarsten dokumentierte Endpunkt gebaut (Konten auflisten,
+read-only) statt geratener Nachrichten-Routen. Vor dem ersten echten
+Beta-Test bitte gezielt genau diese beiden Bereiche ausprobieren und
+Rückmeldung geben, falls ein Endpunkt 404 statt der erwarteten Daten
+liefert — dann ist wahrscheinlich der URL-Präfix falsch geraten.
+
+**Workspace-Sync** liest den Ordner der aktuell aktiven Hermes-Sitzung
+(`host.state.cwd`) und lädt eine vom Nutzer ausgewählte Teilmenge der
+Dateien darin zu einem konfigurierbaren Nextcloud-Ordner hoch (Standard:
+`HermesSync`, änderbar im Workspace-Sync-Tab). Nur lokal → Nextcloud, kein
+Rücksync, kein automatischer Hintergrundlauf — jeder Upload braucht einen
+bewussten Klick plus Bestätigungsdialog. Dateien über 50 MB werden
+übersprungen (mit Fehlermeldung in der Ergebnisliste), kein stillschweigender
+Abbruch.
 
 ## Installation
 
@@ -238,7 +275,7 @@ an.
   Erfolge). Ältere Dateien ohne diesen Block werden beim Lesen ergänzt, es geht
   nichts verloren.
 - **`ctx.storage`** (`hermes.plugin.hermes-nextcloud.*`): zuletzt gewählter Tab,
-  Erinnerungs-Intervall
+  Erinnerungs-Intervall, Workspace-Sync-Zielordner
 
 Nichts davon liegt im `~/.hermes/hermes-agent`-Checkout, also überlebt alles ein
 Hermes-Auto-Update.
@@ -249,20 +286,31 @@ Ehrlich benannt, statt unerwähnt zu lassen — nach dem Vorbild anderer
 Hermes-Plugins mit eigenem "Security notes"-Abschnitt:
 
 - **Netzwerkzugriffe:** ausschließlich zur selbst konfigurierten
-  Nextcloud-Instanz (CalDAV, CardDAV, WebDAV, OCS-REST für Notizen/Deck).
-  Keine Telemetrie, kein Aufruf irgendeines anderen Servers.
+  Nextcloud-Instanz (CalDAV, CardDAV, WebDAV, OCS-REST für Notizen/Deck/
+  Forms/Talk/Mail). Keine Telemetrie, kein Aufruf irgendeines anderen
+  Servers.
 - **Auth:** ein einziges Nextcloud-App-Passwort (siehe „Einrichtung"), HTTP
-  Basic Auth. Kein OAuth-Flow, kein zusätzlicher Zugangsdaten-Speicher pro
-  Funktionsbereich.
+  Basic Auth, für ALLE Bereiche einschließlich Talk/Mail. Kein OAuth-Flow,
+  kein zusätzlicher Zugangsdaten-Speicher pro Funktionsbereich.
 - **Lokale Prozessaufrufe:** ein einziger `subprocess.run` (Installation der
   `caldav`-Bibliothek, ausschließlich über eine feste Argument-Liste mit
   `sys.executable -m pip install caldav`, nie `shell=True`, nie mit
   Nutzereingabe zusammengesetzt), nur nach explizitem Klick im
   Einrichtungs-Dialog, nie automatisch beim Laden.
+- **Lokaler Dateizugriff (neu, Workspace-Sync):** das Backend liest Dateien
+  ausschließlich aus dem Ordner, den Hermes selbst als aktive Sitzung
+  meldet (`host.state.cwd`), nie aus einem frei eingegebenen Pfad. Kein
+  automatischer Lauf — jede Leseoperation kommt von einem Klick im
+  Workspace-Sync-Tab, jeder Upload zusätzlich hinter einem
+  Bestätigungsdialog. Dateien über 50 MB werden übersprungen.
 - **Schreibzugriffe:** auf Aufgaben/Termine (Kalender-Tab, mit
-  Rückgängig-Hinweis) und auf Deck-Karten (mit Bestätigungsdialog vor jeder
-  Aktion). Notizen haben volles CRUD. Kontakte und Dateien sind aktuell
-  read-only.
+  Rückgängig-Hinweis), Deck-Karten, Datei-Umbenennungen, Formular-Abgaben,
+  Talk-Nachrichten und Workspace-Sync-Uploads — alle außer dem Kalender
+  hinter einem Bestätigungsdialog. Notizen haben volles CRUD. Kontakte und
+  Mail-Konten sind read-only.
 - **`plugin.yaml`** deklariert bewusst kein `permissions`/`capabilities`-Feld
   — entspricht der Konvention der offiziellen Hermes-Kataloger-Plugins,
   keine Rechte über das Nötige hinaus anzumelden.
+- **Talk und Mail sind Beta-Status**, siehe „Weitere Nextcloud-Bereiche"
+  oben — Auth-Modell bzw. URL-Struktur sind dokumentationsbasiert gebaut,
+  noch nicht gegen eine echte Instanz verifiziert.

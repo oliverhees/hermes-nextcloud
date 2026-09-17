@@ -6,18 +6,24 @@ waeren: Credential-Speicherung (Klartext-Passwort, Dateirechte), die
 Gamification-Mathematik (XP/Level/Erfolge - direkt nutzersichtbar bei jedem
 erledigten Task) und den seit dieser Version expliziten caldav-Consent-Weg.
 
-Bewusst NICHT abgedeckt: die eigentlichen CalDAV-Schreibpfade (/events,
-/events/move, /focus/complete gegen einen echten Kalender) und - seit dem
-Deck-Schreibzugriff (17.09.2026) - ebenso /deck/.../cards/{id} und
-/deck/.../cards/{id}/move. Alle brauchen entweder eine echte Nextcloud-
-Instanz oder ein sorgfaeltig gebautes Mock der jeweiligen Bibliothek/HTTP-
-Antwort, das hier bewusst nicht blind nachgebaut wird, um keine falsche
-Sicherheit vorzutaeuschen. Die Deck-Endpunkte sind gegen die offizielle
-Nextcloud-Deck-API-Doku gebaut (docs/API.md im nextcloud/deck-Repo), aber
-NICHT live gegen eine echte Instanz verifiziert - das ist ausdruecklich
-offen, siehe README-Abschnitt "Sicherheit"/Verifikation im zugehoerigen
-Umsetzungsplan. Naechster Schritt fuer eine spaetere Runde, nicht Teil
-dieses Batches.
+Bewusst NICHT abgedeckt: alle Routen, die echten HTTP-Traffic gegen eine
+Nextcloud-Instanz brauchen (CalDAV-Schreibpfade /events, /events/move,
+/focus/complete; Deck /deck/.../cards/{id} + .../move; Forms /forms/...;
+Talk /talk/...; Mail /mail/accounts; Files /files/move). Alle brauchen
+entweder eine echte Nextcloud-Instanz oder ein sorgfaeltig gebautes Mock
+der jeweiligen Bibliothek/HTTP-Antwort, das hier bewusst nicht blind
+nachgebaut wird, um keine falsche Sicherheit vorzutaeuschen. Deck/Forms
+sind gegen die jeweils offizielle, gut dokumentierte API gebaut; Talk
+zusaetzlich mit unbestaetigtem Auth-Modell; Mail nur mit einem einzigen,
+besonders vorsichtig ausgewaehlten Endpunkt, weil die App-API insgesamt
+duenn dokumentiert ist. Nichts davon ist live verifiziert - siehe
+README-Abschnitt "Sicherheit". Naechster Schritt fuer eine spaetere Runde
+mit Zugriff auf eine echte Instanz, nicht Teil dieses Batches.
+
+Sehr wohl abgedeckt: die reine Python-Logik der neuen Workspace-Sync- und
+Datei-Pfad-Validierung (_workspace_dir, _clean_dav_segment) - die braucht
+kein Netzwerk und haette bei einem Fehler (z.B. Pfad-Traversal) echten
+Schaden angerichtet.
 """
 from __future__ import annotations
 
@@ -216,6 +222,50 @@ class CaldavConsentTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("fehlgeschlagen", fehler)
+
+
+class WorkspacePathValidationTest(unittest.TestCase):
+    """Reine Pfad-Logik, kein Netzwerk noetig - ein Fehler hier waere ein
+    echtes Sicherheitsproblem (Pfad-Traversal, beliebiger Datei-Upload)."""
+
+    def test_workspace_dir_lehnt_relativen_pfad_ab(self):
+        api = load_api_module()
+        with self.assertRaises(api.HTTPException) as ctx:
+            api._workspace_dir("relativer/pfad")
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_workspace_dir_lehnt_nicht_existierenden_pfad_ab(self):
+        api = load_api_module()
+        with self.assertRaises(api.HTTPException) as ctx:
+            api._workspace_dir("/pfad/der/garantiert/nicht/existiert/xyz123")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_workspace_dir_akzeptiert_echten_ordner(self):
+        api = load_api_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = api._workspace_dir(tmp)
+        self.assertEqual(str(result), str(Path(tmp).resolve()))
+
+    def test_workspace_dir_lehnt_datei_statt_ordner_ab(self):
+        api = load_api_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            datei = Path(tmp) / "datei.txt"
+            datei.write_text("x")
+            with self.assertRaises(api.HTTPException) as ctx:
+                api._workspace_dir(str(datei))
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_clean_dav_segment_lehnt_pfad_traversal_ab(self):
+        api = load_api_module()
+        for bad in ("../geheim", "a/../b", "..", ""):
+            with self.assertRaises(api.HTTPException, msg=bad) as ctx:
+                api._clean_dav_segment(bad, field="test")
+            self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_clean_dav_segment_akzeptiert_normalen_pfad(self):
+        api = load_api_module()
+        self.assertEqual(api._clean_dav_segment("Ordner/Datei.txt", field="test"), "Ordner/Datei.txt")
+        self.assertEqual(api._clean_dav_segment("/Ordner/", field="test"), "Ordner")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 name: hermes-nextcloud
 manifest_version: 1
-version: 0.2.0
+version: 0.3.0
 description: >
   Nextcloud-Dashboard fuer Hermes Desktop: Kalender, Aufgaben und weitere
   Nextcloud-Bereiche als Panes direkt im Hermes-Fenster. Bringt einen

@@ -2112,3 +2112,371 @@ async def list_files(path: str = "") -> dict:
         raise HTTPException(status_code=502, detail=f"Dateien nicht abrufbar (Status {status}).")
     items = _parse_propfind_files(body, dav_path)
     return {"path": clean_path, "items": items}
+
+
+def _clean_dav_segment(value: str, *, field: str) -> str:
+    text = str(value or "").strip("/")
+    if not text or ".." in text.split("/"):
+        raise HTTPException(status_code=422, detail=f"Feld '{field}' ungueltig.")
+    return text
+
+
+@router.post("/files/move")
+async def move_file(body: dict) -> dict:
+    """Verschiebt/benennt eine Datei per WebDAV MOVE um. 'Overwrite: F' ist
+    bewusst gesetzt - ein versehentliches Ueberschreiben einer bestehenden
+    Zieldatei waere schlimmer als ein Fehler, der zum Umbenennen zwingt."""
+    cfg = _config()
+    source = _clean_dav_segment(_body_str(body, "from"), field="from")
+    target = _clean_dav_segment(_body_str(body, "to"), field="to")
+    source_path = f"/remote.php/dav/files/{cfg['username']}/{source}"
+    target_url = f"{cfg['base_url']}/remote.php/dav/files/{cfg['username']}/{target}"
+    status, _body = _nc_request(
+        "MOVE",
+        source_path,
+        cfg,
+        headers={"Destination": target_url, "Overwrite": "F"},
+    )
+    if status == 404:
+        raise HTTPException(status_code=404, detail=f"'{source}' existiert nicht.")
+    if status == 412:
+        raise HTTPException(status_code=409, detail=f"'{target}' existiert bereits.")
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Verschieben fehlgeschlagen (Status {status}).")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Formulare (Forms)
+#
+# MVP: Text- und Options-Fragen (Kurztext/Langtext/Auswahl/Mehrfachauswahl/
+# Dropdown). Datei-Upload-Fragen werden absichtlich nicht unterstuetzt -
+# brauchen einen eigenen Zwei-Schritt-Upload-Flow (erst Datei hochladen,
+# dann uploadedFileId+uploadToken mitschicken), eigene Runde noetig.
+
+FORMS_BASE = "/ocs/v2.php/apps/forms/api/v3/forms"
+FORMS_FILE_QUESTION_TYPES = {"file"}
+
+
+def _forms_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail="Die Forms-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.",
+    )
+
+
+def _ocs_json(status: int, body: bytes, *, context: str, unavailable: HTTPException) -> Any:
+    """OCS v2 wrappt Antworten normalerweise in {"ocs": {"data": ...}} - v3
+    (Forms) antwortet laut Doku direkt mit dem Objekt/Array, beide Formen
+    abfangen. Gemeinsam genutzt von Forms/Talk/Mail - alles OCS-REST."""
+    if status == 404:
+        raise unavailable
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"{context} (Status {status}).")
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"{context}: Antwort nicht lesbar ({exc}).") from exc
+    if isinstance(payload, dict) and "ocs" in payload:
+        return payload["ocs"].get("data")
+    return payload
+
+
+@router.get("/forms")
+async def list_forms() -> dict:
+    cfg = _config()
+    status, body = _nc_request(
+        "GET",
+        f"{FORMS_BASE}?type=owned",
+        cfg,
+        headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+    )
+    data = _ocs_json(status, body, context="Formulare nicht abrufbar", unavailable=_forms_unavailable())
+    forms = data if isinstance(data, list) else []
+    return {
+        "forms": [
+            {"id": f.get("id"), "title": f.get("title") or "Ohne Titel", "expires": f.get("expires") or 0}
+            for f in forms
+            if not f.get("partial")
+        ]
+    }
+
+
+@router.get("/forms/{form_id}")
+async def get_form(form_id: int) -> dict:
+    cfg = _config()
+    status, body = _nc_request(
+        "GET",
+        f"{FORMS_BASE}/{form_id}",
+        cfg,
+        headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+    )
+    data = _ocs_json(status, body, context="Formular nicht abrufbar", unavailable=_forms_unavailable())
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Formular-Antwort nicht lesbar.")
+    questions = data.get("questions") or []
+    return {
+        "id": data.get("id"),
+        "title": data.get("title") or "Ohne Titel",
+        "questions": [
+            {
+                "id": q.get("id"),
+                "text": q.get("text") or "",
+                "type": q.get("type") or "short",
+                "isRequired": bool(q.get("isRequired")),
+                "supported": q.get("type") not in FORMS_FILE_QUESTION_TYPES,
+                "options": [
+                    {"id": o.get("id"), "text": o.get("text") or ""} for o in (q.get("options") or [])
+                ],
+            }
+            for q in questions
+        ],
+    }
+
+
+@router.post("/forms/{form_id}/submissions")
+async def submit_form(form_id: int, body: dict) -> dict:
+    """'answers' kommt vom Frontend bereits im Nextcloud-Format
+    ({questionId: [werte]}) - das Frontend kennt die Fragetypen aus
+    GET /forms/{id} und baut die Werte entsprechend (Options-IDs fuer
+    Auswahlfragen, Strings fuer Textfragen)."""
+    answers = (body or {}).get("answers")
+    if not isinstance(answers, dict) or not answers:
+        raise HTTPException(status_code=422, detail="Feld 'answers' fehlt oder ist leer.")
+    cfg = _config()
+    status, resp_body = _nc_request(
+        "POST",
+        f"{FORMS_BASE}/{form_id}/submissions",
+        cfg,
+        headers={
+            "OCS-APIRequest": "true",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        body=json.dumps({"answers": answers}).encode("utf-8"),
+    )
+    if status == 404:
+        raise _forms_unavailable()
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Absenden fehlgeschlagen (Status {status}).")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Workspace-Sync
+#
+# NUR lokal -> Nextcloud (kein Ruecksync), manueller Aufruf vom Frontend,
+# Dateiauswahl liegt beim Nutzer (Oliver: "man sollte waehlen koennen").
+# Das Backend ist ein normaler lokaler Python-Prozess (kein Browser-Sandbox)
+# und darf deshalb Dateien direkt aus dem uebergebenen Ordner lesen - kein
+# MCP noetig, wie in der Planungsrunde festgehalten.
+
+WORKSPACE_MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB - grosszuegig fuer Bilder/Dokumente, kein Freibrief fuer Videos
+
+
+def _workspace_dir(path: str) -> Path:
+    candidate = Path(str(path or "").strip())
+    if not candidate.is_absolute():
+        raise HTTPException(status_code=422, detail="'path' muss ein absoluter Ordnerpfad sein.")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail=f"Ordner nicht lesbar: {exc}") from exc
+    if not resolved.is_dir():
+        raise HTTPException(status_code=422, detail=f"'{resolved}' ist kein Ordner.")
+    return resolved
+
+
+@router.get("/workspace/files")
+async def list_workspace_files(path: str = "") -> dict:
+    directory = _workspace_dir(path)
+    items = []
+    for entry in sorted(directory.iterdir(), key=lambda p: p.name.lower()):
+        if not entry.is_file():
+            continue
+        try:
+            size = entry.stat().st_size
+        except OSError:
+            size = 0
+        items.append({"name": entry.name, "size": size})
+    return {"path": str(directory), "items": items}
+
+
+def _ensure_nc_folder(cfg: dict, folder: str) -> None:
+    """MKCOL auf jedes Pfadsegment - Nextcloud legt keine verschachtelten
+    Ordner in einem Schritt an. 405 (existiert schon) und 409 (Elternordner
+    fehlt noch, wird im naechsten Segment nachgeholt) sind hier kein Fehler,
+    alles andere schon."""
+    segments = [s for s in folder.strip("/").split("/") if s]
+    built = ""
+    for segment in segments:
+        built = f"{built}/{segment}"
+        status, _body = _nc_request(
+            "MKCOL",
+            f"/remote.php/dav/files/{cfg['username']}{built}",
+            cfg,
+        )
+        if status not in (201, 405, 409):
+            raise HTTPException(
+                status_code=502, detail=f"Zielordner '{built}' nicht anlegbar (Status {status})."
+            )
+
+
+@router.post("/workspace/sync")
+async def sync_workspace(body: dict) -> dict:
+    directory = _workspace_dir((body or {}).get("path"))
+    names = (body or {}).get("files")
+    if not isinstance(names, list) or not names:
+        raise HTTPException(status_code=422, detail="Feld 'files' fehlt oder ist leer.")
+    target_folder = _clean_dav_segment(
+        (body or {}).get("targetFolder") or "HermesSync", field="targetFolder"
+    )
+    cfg = _config()
+    _ensure_nc_folder(cfg, target_folder)
+
+    uploaded: list[str] = []
+    failed: list[dict] = []
+    for name in names:
+        name = str(name)
+        if "/" in name or "\\" in name or name in ("..", "."):
+            failed.append({"name": name, "error": "ungueltiger Dateiname"})
+            continue
+        local_file = directory / name
+        try:
+            data = local_file.read_bytes()
+        except OSError as exc:
+            failed.append({"name": name, "error": str(exc)})
+            continue
+        if len(data) > WORKSPACE_MAX_FILE_BYTES:
+            failed.append({"name": name, "error": "Datei groesser als 50 MB, uebersprungen"})
+            continue
+        status, _resp = _nc_request(
+            "PUT",
+            f"/remote.php/dav/files/{cfg['username']}/{target_folder}/{name}",
+            cfg,
+            body=data,
+        )
+        if status in (200, 201, 204):
+            uploaded.append(name)
+        else:
+            failed.append({"name": name, "error": f"Status {status}"})
+
+    return {"ok": not failed, "uploaded": uploaded, "failed": failed, "targetFolder": target_folder}
+
+
+# ---------------------------------------------------------------- Talk
+#
+# WICHTIG - Auth-Modell fuer Talk ist NICHT wie bei Deck/Forms in der
+# Nextcloud-eigenen Doku explizit als App-Passwort/Basic-Auth bestaetigt
+# (nur implizit ueber dasselbe OCS-Muster). Gebaut nach bestem Wissen aus
+# github.com/nextcloud/spreed/docs/{conversation,chat}.md, aber NOCH NICHT
+# gegen eine echte Instanz verifiziert - siehe README "Sicherheit".
+
+TALK_ROOM_BASE = "/ocs/v2.php/apps/spreed/api/v4/room"
+TALK_CHAT_BASE = "/ocs/v2.php/apps/spreed/api/v1/chat"
+
+
+def _talk_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail="Die Talk-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.",
+    )
+
+
+@router.get("/talk/rooms")
+async def list_talk_rooms() -> dict:
+    cfg = _config()
+    status, body = _nc_request(
+        "GET", TALK_ROOM_BASE, cfg, headers={"OCS-APIRequest": "true", "Accept": "application/json"}
+    )
+    data = _ocs_json(status, body, context="Räume nicht abrufbar", unavailable=_talk_unavailable())
+    rooms = data if isinstance(data, list) else []
+    return {
+        "rooms": [
+            {"token": r.get("token"), "name": r.get("displayName") or r.get("name") or "Ohne Namen"}
+            for r in rooms
+        ]
+    }
+
+
+@router.get("/talk/rooms/{token}/messages")
+async def list_talk_messages(token: str) -> dict:
+    cfg = _config()
+    status, body = _nc_request(
+        "GET",
+        f"{TALK_CHAT_BASE}/{token}?lookIntoFuture=0&limit=50",
+        cfg,
+        headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+    )
+    data = _ocs_json(status, body, context="Nachrichten nicht abrufbar", unavailable=_talk_unavailable())
+    messages = data if isinstance(data, list) else []
+    return {
+        "messages": [
+            {
+                "id": m.get("id"),
+                "actor": m.get("actorDisplayName") or "?",
+                "message": m.get("message") or "",
+                "timestamp": m.get("timestamp"),
+                "system": bool(m.get("systemMessage")),
+            }
+            for m in messages
+            if not m.get("systemMessage")
+        ]
+    }
+
+
+@router.post("/talk/rooms/{token}/messages")
+async def send_talk_message(token: str, body: dict) -> dict:
+    text = _body_str(body, "message")
+    cfg = _config()
+    status, resp_body = _nc_request(
+        "POST",
+        f"{TALK_CHAT_BASE}/{token}",
+        cfg,
+        headers={
+            "OCS-APIRequest": "true",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        body=json.dumps({"message": text}).encode("utf-8"),
+    )
+    if status == 404:
+        raise _talk_unavailable()
+    if status >= 400:
+        raise HTTPException(status_code=502, detail=f"Nachricht nicht sendbar (Status {status}).")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Mail
+#
+# BEWUSST MINIMAL - die Mail-App-OCS-API ist deutlich duenner dokumentiert
+# als Deck/Forms/Talk (kein docs/API.md, kein openapi.json im Repo-Root,
+# uneinheitliche url-Praefixe zwischen den eigenen Controllern - manche
+# ApiRoute-Attribute haben ein literales 'ocs/'-Segment im Pfad, andere
+# nicht). Nur die EINE Route mit der klarsten, saubersten Attribut-Definition
+# (Konten auflisten, read-only) ist hier gebaut. Nachrichten lesen/senden
+# bewusst NICHT gebaut, bevor das nicht gegen eine echte Instanz verifiziert
+# ist - sonst raet der Code an einer URL, die vermutlich falsch ist.
+
+MAIL_BASE = "/ocs/v2.php/apps/mail/api/v1"
+
+
+def _mail_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail="Die Mail-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.",
+    )
+
+
+@router.get("/mail/accounts")
+async def list_mail_accounts() -> dict:
+    cfg = _config()
+    status, body = _nc_request(
+        "GET",
+        f"{MAIL_BASE}/account/list",
+        cfg,
+        headers={"OCS-APIRequest": "true", "Accept": "application/json"},
+    )
+    data = _ocs_json(status, body, context="Mail-Konten nicht abrufbar", unavailable=_mail_unavailable())
+    accounts = data if isinstance(data, list) else []
+    return {
+        "accounts": [{"id": a.get("id"), "email": a.get("email") or ""} for a in accounts]
+    }

@@ -116,7 +116,18 @@ function makeApi(ctx) {
         order: 0
       }),
     contacts: () => call('/contacts', 'GET'),
-    files: path => call(`/files?path=${encodeURIComponent(path || '')}`, 'GET')
+    files: path => call(`/files?path=${encodeURIComponent(path || '')}`, 'GET'),
+    filesMove: (from, to) => call('/files/move', 'POST', { from, to }),
+    formsList: () => call('/forms', 'GET'),
+    formGet: id => call(`/forms/${id}`, 'GET'),
+    formSubmit: (id, answers) => call(`/forms/${id}/submissions`, 'POST', { answers }),
+    workspaceFiles: path => call(`/workspace/files?path=${encodeURIComponent(path || '')}`, 'GET'),
+    workspaceSync: (path, files, targetFolder) =>
+      call('/workspace/sync', 'POST', { path, files, targetFolder }),
+    talkRooms: () => call('/talk/rooms', 'GET'),
+    talkMessages: token => call(`/talk/rooms/${token}/messages`, 'GET'),
+    talkSend: (token, message) => call(`/talk/rooms/${token}/messages`, 'POST', { message }),
+    mailAccounts: () => call('/mail/accounts', 'GET')
   }
 }
 
@@ -706,7 +717,10 @@ const ADHS_TABS = [
   ['notizen', 'Notizen'],
   ['deck', 'Deck'],
   ['kontakte', 'Kontakte'],
-  ['dateien', 'Dateien']
+  ['dateien', 'Dateien'],
+  ['formulare', 'Formulare'],
+  ['talk', 'Talk'],
+  ['workspace', 'Workspace-Sync']
 ]
 
 const PLAIN_TABS = [
@@ -714,7 +728,10 @@ const PLAIN_TABS = [
   ['notizen', 'Notizen'],
   ['deck', 'Deck'],
   ['kontakte', 'Kontakte'],
-  ['dateien', 'Dateien']
+  ['dateien', 'Dateien'],
+  ['formulare', 'Formulare'],
+  ['talk', 'Talk'],
+  ['workspace', 'Workspace-Sync']
 ]
 
 function Tabs({ value, onChange, adhsMode, onToggleSettings, settingsOpen }) {
@@ -767,7 +784,33 @@ function Tabs({ value, onChange, adhsMode, onToggleSettings, settingsOpen }) {
   })
 }
 
-function SettingsPanel({ ctx, adhsMode, onChangeAdhsMode }) {
+// Mail-Integration ist bewusst minimal (nur Konten auflisten, read-only) -
+// die Mail-App-OCS-API ist duenner dokumentiert als Deck/Forms/Talk, siehe
+// Kommentar bei /mail/accounts im Backend. Faellt der Aufruf durch (falsche
+// URL, App fehlt), verschwindet der Block einfach still - kein Fehler-Banner
+// fuer ein Beta-Feature, das ohnehin noch verifiziert werden muss.
+function MailAccountsBlock({ api }) {
+  const [accounts, setAccounts] = useState(null)
+
+  useEffect(() => {
+    api
+      .mailAccounts()
+      .then(data => setAccounts((data && data.accounts) || []))
+      .catch(() => setAccounts([]))
+  }, [])
+
+  if (!accounts || !accounts.length) return null
+
+  return jsxs('div', {
+    style: { fontSize: '0.74rem', color: 'var(--ui-text-tertiary)' },
+    children: [
+      'Mail-Konten (Beta, nur lesen): ',
+      accounts.map(a => a.email).filter(Boolean).join(', ')
+    ]
+  })
+}
+
+function SettingsPanel({ ctx, api, adhsMode, onChangeAdhsMode }) {
   return jsxs('div', {
     style: {
       padding: '12px 16px',
@@ -777,6 +820,7 @@ function SettingsPanel({ ctx, adhsMode, onChangeAdhsMode }) {
       gap: '6px'
     },
     children: [
+      jsx(MailAccountsBlock, { api }),
       jsxs('label', {
         style: {
           display: 'flex',
@@ -2884,14 +2928,20 @@ function FilesView({ api, setError }) {
   const [path, setPath] = useState('')
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
+  const [renaming, setRenaming] = useState(null) // { name, draft }
+  const [pendingRename, setPendingRename] = useState(null) // { from, to, name }
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     setLoading(true)
-    api
+    return api
       .files(path)
       .then(data => setItems((data && data.items) || []))
       .catch(error => setError(describeError(error)))
       .then(() => setLoading(false), () => setLoading(false))
+  }, [api, path, setError])
+
+  useEffect(() => {
+    reload()
   }, [path])
 
   const segments = path ? path.split('/').filter(Boolean) : []
@@ -2929,20 +2979,474 @@ function FilesView({ api, setError }) {
           ? jsx('div', {
               style: { display: 'flex', flexDirection: 'column', gap: '2px' },
               children: items.map(item =>
-                jsx(DayRow, {
-                  title: (item.isDirectory ? '📁 ' : '') + item.name,
-                  meta: item.isDirectory ? '' : item.size ? `${Math.round(item.size / 1024)} KB` : '',
-                  action: item.isDirectory
-                    ? jsx(Button, {
-                        variant: 'ghost',
-                        onClick: () => setPath(path ? `${path}/${item.name}` : item.name),
-                        children: 'Öffnen'
+                renaming && renaming.name === item.name
+                  ? jsxs('div', {
+                      style: { display: 'flex', gap: '6px', alignItems: 'center', padding: '4px 0' },
+                      children: [
+                        jsx(Input, {
+                          value: renaming.draft,
+                          onChange: event => setRenaming({ name: item.name, draft: event.target.value })
+                        }),
+                        jsx(Button, {
+                          variant: 'default',
+                          onClick: () => {
+                            const newName = renaming.draft.trim()
+                            if (!newName || newName === item.name) {
+                              setRenaming(null)
+                              return
+                            }
+                            const dir = path ? `${path}/` : ''
+                            setPendingRename({ from: `${dir}${item.name}`, to: `${dir}${newName}`, name: item.name, newName })
+                            setRenaming(null)
+                          },
+                          children: 'OK'
+                        }),
+                        jsx(Button, { variant: 'ghost', onClick: () => setRenaming(null), children: 'Abbrechen' })
+                      ]
+                    }, item.name)
+                  : jsx(DayRow, {
+                      title: (item.isDirectory ? '📁 ' : '') + item.name,
+                      meta: item.isDirectory ? '' : item.size ? `${Math.round(item.size / 1024)} KB` : '',
+                      action: jsxs('div', {
+                        style: { display: 'flex', gap: '4px' },
+                        children: [
+                          item.isDirectory
+                            ? jsx(Button, {
+                                variant: 'ghost',
+                                onClick: () => setPath(path ? `${path}/${item.name}` : item.name),
+                                children: 'Öffnen'
+                              })
+                            : null,
+                          jsx(Button, {
+                            variant: 'ghost',
+                            onClick: () => setRenaming({ name: item.name, draft: item.name }),
+                            children: 'Umbenennen'
+                          })
+                        ]
                       })
-                    : null
-                }, item.name)
+                    }, item.name)
               )
             })
-          : jsx(EmptyState, { title: 'Ordner ist leer.', description: '' })
+          : jsx(EmptyState, { title: 'Ordner ist leer.', description: '' }),
+      pendingRename
+        ? jsx(ConfirmDialog, {
+            open: true,
+            onClose: () => setPendingRename(null),
+            title: 'Umbenennen?',
+            description: `„${pendingRename.name}" wird zu „${pendingRename.newName}". Schreibt direkt in Nextcloud.`,
+            confirmLabel: 'Umbenennen',
+            onConfirm: () =>
+              api
+                .filesMove(pendingRename.from, pendingRename.to)
+                .then(() => reload())
+                .catch(error => {
+                  setError(describeError(error))
+                  throw error
+                })
+          })
+        : null
+    ]
+  })
+}
+
+// ---------------------------------------------------------------- Formulare
+
+function FormsView({ api, setError }) {
+  const [forms, setForms] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [unavailable, setUnavailable] = useState(false)
+  const [openId, setOpenId] = useState(null)
+  const [question, setQuestion] = useState(null)
+  const [answers, setAnswers] = useState({})
+  const [sent, setSent] = useState(false)
+  const [pendingSubmit, setPendingSubmit] = useState(false)
+
+  useEffect(() => {
+    api
+      .formsList()
+      .then(data => {
+        setForms((data && data.forms) || [])
+        setUnavailable(false)
+      })
+      .catch(error => {
+        if (describeError(error).includes('nicht installiert oder aktiviert')) setUnavailable(true)
+        else setError(describeError(error))
+      })
+      .then(() => setLoading(false), () => setLoading(false))
+  }, [])
+
+  const open = formId => {
+    setSent(false)
+    setAnswers({})
+    api
+      .formGet(formId)
+      .then(data => {
+        setQuestion(data)
+        setOpenId(formId)
+      })
+      .catch(error => setError(describeError(error)))
+  }
+
+  const setTextAnswer = (qid, value) => setAnswers(a => ({ ...a, [qid]: value ? [value] : [] }))
+  const toggleOptionAnswer = (qid, optionId, multi) =>
+    setAnswers(a => {
+      const current = a[qid] || []
+      if (multi) {
+        return {
+          ...a,
+          [qid]: current.includes(optionId) ? current.filter(v => v !== optionId) : [...current, optionId]
+        }
+      }
+      return { ...a, [qid]: [optionId] }
+    })
+
+  const submit = () =>
+    api
+      .formSubmit(openId, answers)
+      .then(() => setSent(true))
+      .catch(error => {
+        setError(describeError(error))
+        throw error
+      })
+      .finally(() => setPendingSubmit(false))
+
+  if (unavailable) {
+    return jsx('div', {
+      style: { padding: '32px 24px' },
+      children: jsx(EmptyState, {
+        title: 'Formulare sind hier nicht verfügbar.',
+        description: 'Die Forms-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.'
+      })
+    })
+  }
+
+  if (loading) {
+    return jsx('div', { style: { padding: '24px', color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' }, children: 'Wird geladen…' })
+  }
+
+  if (openId !== null && question) {
+    if (sent) {
+      return jsx('div', {
+        style: { padding: '32px 24px' },
+        children: jsx(EmptyState, { title: 'Abgeschickt.', description: 'Danke — die Antworten sind in Nextcloud gespeichert.' })
+      })
+    }
+    return jsxs('div', {
+      style: { padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px' },
+      children: [
+        jsx(Button, { variant: 'ghost', onClick: () => setOpenId(null), children: '← Zurück' }),
+        jsx('div', { style: { fontWeight: 700, fontSize: '0.95rem', color: 'var(--ui-text-primary)' }, children: question.title }),
+        ...question.questions.map(q =>
+          jsxs('div', {
+            style: { display: 'flex', flexDirection: 'column', gap: '6px' },
+            children: [
+              jsx('div', {
+                style: { fontSize: '0.84rem', color: 'var(--ui-text-primary)' },
+                children: q.text + (q.isRequired ? ' *' : '')
+              }),
+              !q.supported
+                ? jsx('div', {
+                    style: { fontSize: '0.76rem', color: 'var(--ui-text-tertiary)' },
+                    children: 'Dateifragen werden hier noch nicht unterstützt.'
+                  })
+                : q.options.length
+                  ? jsx('div', {
+                      style: { display: 'flex', flexDirection: 'column', gap: '4px' },
+                      children: q.options.map(opt =>
+                        jsxs('label', {
+                          style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem' },
+                          children: [
+                            jsx('input', {
+                              type: q.type === 'multiple' ? 'checkbox' : 'radio',
+                              name: `q${q.id}`,
+                              checked: (answers[q.id] || []).includes(opt.id),
+                              onChange: () => toggleOptionAnswer(q.id, opt.id, q.type === 'multiple')
+                            }),
+                            opt.text
+                          ]
+                        }, opt.id)
+                      )
+                    })
+                  : jsx(Input, {
+                      value: (answers[q.id] || [])[0] || '',
+                      onChange: event => setTextAnswer(q.id, event.target.value)
+                    })
+            ]
+          }, q.id)
+        ),
+        jsx(Button, {
+          variant: 'default',
+          disabled: pendingSubmit,
+          onClick: () => setPendingSubmit(true),
+          children: 'Absenden'
+        }),
+        pendingSubmit
+          ? jsx(ConfirmDialog, {
+              open: true,
+              onClose: () => setPendingSubmit(false),
+              title: 'Formular absenden?',
+              description: 'Schreibt die Antworten direkt in Nextcloud.',
+              confirmLabel: 'Absenden',
+              onConfirm: submit
+            })
+          : null
+      ]
+    })
+  }
+
+  return jsx('div', {
+    style: { padding: '16px' },
+    children: forms.length
+      ? jsx('div', {
+          style: { display: 'flex', flexDirection: 'column', gap: '2px' },
+          children: forms.map(f =>
+            jsx(DayRow, {
+              title: f.title,
+              meta: '',
+              action: jsx(Button, { variant: 'ghost', onClick: () => open(f.id), children: 'Öffnen' })
+            }, f.id)
+          )
+        })
+      : jsx(EmptyState, { title: 'Keine Formulare gefunden.', description: '' })
+  })
+}
+
+// ---------------------------------------------------------------- Talk
+
+function TalkView({ api, setError }) {
+  const [rooms, setRooms] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [unavailable, setUnavailable] = useState(false)
+  const [token, setToken] = useState(null)
+  const [messages, setMessages] = useState([])
+  const [draft, setDraft] = useState('')
+  const [sending, setSending] = useState(false)
+
+  useEffect(() => {
+    api
+      .talkRooms()
+      .then(data => {
+        setRooms((data && data.rooms) || [])
+        setUnavailable(false)
+      })
+      .catch(error => {
+        if (describeError(error).includes('nicht installiert oder aktiviert')) setUnavailable(true)
+        else setError(describeError(error))
+      })
+      .then(() => setLoading(false), () => setLoading(false))
+  }, [])
+
+  const openRoom = roomToken => {
+    setToken(roomToken)
+    api
+      .talkMessages(roomToken)
+      .then(data => setMessages((data && data.messages) || []))
+      .catch(error => setError(describeError(error)))
+  }
+
+  const send = () => {
+    const text = draft.trim()
+    if (!text || sending) return
+    setSending(true)
+    api
+      .talkSend(token, text)
+      .then(() => {
+        setDraft('')
+        return api.talkMessages(token)
+      })
+      .then(data => setMessages((data && data.messages) || []))
+      .catch(error => setError(describeError(error)))
+      .then(() => setSending(false), () => setSending(false))
+  }
+
+  if (unavailable) {
+    return jsx('div', {
+      style: { padding: '32px 24px' },
+      children: jsx(EmptyState, {
+        title: 'Talk ist hier nicht verfügbar.',
+        description: 'Die Talk-App ist auf dieser Nextcloud-Instanz nicht installiert oder aktiviert.'
+      })
+    })
+  }
+
+  if (loading) {
+    return jsx('div', { style: { padding: '24px', color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' }, children: 'Wird geladen…' })
+  }
+
+  if (token) {
+    return jsxs('div', {
+      style: { padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px', height: '100%', minHeight: 0 },
+      children: [
+        jsx(Button, { variant: 'ghost', onClick: () => setToken(null), children: '← Räume' }),
+        jsx('div', {
+          style: { flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' },
+          children: messages.map(m =>
+            jsxs('div', {
+              style: { fontSize: '0.82rem' },
+              children: [
+                jsx('span', { style: { fontWeight: 600, color: 'var(--ui-text-primary)' }, children: m.actor + ': ' }),
+                jsx('span', { style: { color: 'var(--ui-text-secondary)' }, children: m.message })
+              ]
+            }, m.id)
+          )
+        }),
+        jsxs('div', {
+          style: { display: 'flex', gap: '6px' },
+          children: [
+            jsx(Input, {
+              value: draft,
+              placeholder: 'Nachricht…',
+              onChange: event => setDraft(event.target.value),
+              onKeyDown: event => {
+                if (event.key === 'Enter') send()
+              }
+            }),
+            jsx(Button, { variant: 'default', disabled: sending, onClick: send, children: 'Senden' })
+          ]
+        })
+      ]
+    })
+  }
+
+  return jsx('div', {
+    style: { padding: '16px' },
+    children: rooms.length
+      ? jsx('div', {
+          style: { display: 'flex', flexDirection: 'column', gap: '2px' },
+          children: rooms.map(r =>
+            jsx(DayRow, {
+              title: r.name,
+              meta: '',
+              action: jsx(Button, { variant: 'ghost', onClick: () => openRoom(r.token), children: 'Öffnen' })
+            }, r.token)
+          )
+        })
+      : jsx(EmptyState, { title: 'Keine Räume gefunden.', description: '' })
+  })
+}
+
+// ---------------------------------------------------------------- Workspace-Sync
+//
+// host.state.cwd ist der lokale Ordner der aktuellen Hermes-Sitzung (leer,
+// wenn keine Sitzung aktiv ist). Nur lokal -> Nextcloud, manueller Knopf,
+// Dateiauswahl per Checkbox (Oliver: "man sollte waehlen koennen").
+
+function WorkspaceSyncView({ ctx, api, setError }) {
+  const cwd = useValue(host.state.cwd)
+  const [files, setFiles] = useState([])
+  const [selected, setSelected] = useState(() => new Set())
+  const [loading, setLoading] = useState(false)
+  const [targetFolder, setTargetFolder] = useState(() => ctx.storage.get('workspaceSyncFolder', 'HermesSync'))
+  const [pendingSync, setPendingSync] = useState(false)
+  const [result, setResult] = useState(null)
+
+  useEffect(() => {
+    if (!cwd) {
+      setFiles([])
+      return
+    }
+    setLoading(true)
+    setResult(null)
+    api
+      .workspaceFiles(cwd)
+      .then(data => {
+        setFiles((data && data.items) || [])
+        setSelected(new Set())
+      })
+      .catch(error => setError(describeError(error)))
+      .then(() => setLoading(false), () => setLoading(false))
+  }, [cwd])
+
+  const toggle = name =>
+    setSelected(current => {
+      const next = new Set(current)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+
+  const saveFolder = value => {
+    setTargetFolder(value)
+    ctx.storage.set('workspaceSyncFolder', value)
+  }
+
+  const runSync = () =>
+    api
+      .workspaceSync(cwd, [...selected], targetFolder)
+      .then(data => {
+        setResult(data)
+        setSelected(new Set())
+      })
+      .catch(error => {
+        setError(describeError(error))
+        throw error
+      })
+
+  if (!cwd) {
+    return jsx('div', {
+      style: { padding: '32px 24px' },
+      children: jsx(EmptyState, {
+        title: 'Kein aktiver Workspace.',
+        description: 'Öffne eine Hermes-Sitzung mit einem Arbeitsordner, dann erscheinen hier ihre Dateien.'
+      })
+    })
+  }
+
+  return jsxs('div', {
+    style: { padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' },
+    children: [
+      jsx('div', { style: { fontSize: '0.76rem', color: 'var(--ui-text-tertiary)' }, children: cwd }),
+      jsxs('label', {
+        style: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.82rem' },
+        children: [
+          'Nextcloud-Zielordner:',
+          jsx(Input, { value: targetFolder, onChange: event => saveFolder(event.target.value) })
+        ]
+      }),
+      loading
+        ? jsx('div', { style: { color: 'var(--ui-text-tertiary)', fontSize: '0.82rem' }, children: 'Wird geladen…' })
+        : files.length
+          ? jsx('div', {
+              style: { display: 'flex', flexDirection: 'column', gap: '2px' },
+              children: files.map(f =>
+                jsxs('label', {
+                  style: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.82rem', padding: '4px 0' },
+                  children: [
+                    jsx('input', { type: 'checkbox', checked: selected.has(f.name), onChange: () => toggle(f.name) }),
+                    jsx('span', { style: { flex: 1 }, children: f.name }),
+                    jsx('span', {
+                      style: { color: 'var(--ui-text-tertiary)', fontSize: '0.74rem' },
+                      children: `${Math.round(f.size / 1024)} KB`
+                    })
+                  ]
+                }, f.name)
+              )
+            })
+          : jsx(EmptyState, { title: 'Keine Dateien im Workspace.', description: '' }),
+      jsx(Button, {
+        variant: 'default',
+        disabled: !selected.size,
+        onClick: () => setPendingSync(true),
+        children: `${selected.size || ''} nach Nextcloud hochladen`.trim()
+      }),
+      result
+        ? jsx(Notice, {
+            tone: result.ok ? 'quiet' : 'normal',
+            children: result.ok
+              ? `${result.uploaded.length} Datei(en) hochgeladen nach „${result.targetFolder}".`
+              : `${result.uploaded.length} hochgeladen, ${result.failed.length} fehlgeschlagen.`
+          })
+        : null,
+      pendingSync
+        ? jsx(ConfirmDialog, {
+            open: true,
+            onClose: () => setPendingSync(false),
+            title: 'Dateien hochladen?',
+            description: `${selected.size} Datei(en) nach „${targetFolder}" in Nextcloud hochladen.`,
+            confirmLabel: 'Hochladen',
+            onConfirm: runSync
+          })
+        : null
     ]
   })
 }
@@ -3144,7 +3648,7 @@ function FokusPage({ ctx }) {
         onToggleSettings: () => setSettingsOpen(current => !current),
         settingsOpen
       }),
-      settingsOpen ? jsx(SettingsPanel, { ctx, adhsMode, onChangeAdhsMode: setAdhsMode }) : null,
+      settingsOpen ? jsx(SettingsPanel, { ctx, api, adhsMode, onChangeAdhsMode: setAdhsMode }) : null,
       error
         ? jsx('div', {
             style: { padding: '12px 16px' },
@@ -3168,7 +3672,13 @@ function FokusPage({ ctx }) {
                       ? jsx(ContactsView, { api, setError })
                       : tab === 'dateien'
                         ? jsx(FilesView, { api, setError })
-                        : jsx(CalendarView, {
+                        : tab === 'formulare'
+                          ? jsx(FormsView, { api, setError })
+                          : tab === 'talk'
+                            ? jsx(TalkView, { api, setError })
+                            : tab === 'workspace'
+                              ? jsx(WorkspaceSyncView, { ctx, api, setError })
+                              : jsx(CalendarView, {
                             api,
                             month: calMonth,
                             days: monthDays,
