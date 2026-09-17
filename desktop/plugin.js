@@ -2543,6 +2543,7 @@ function NotesView({ api, setError }) {
   const [draftContent, setDraftContent] = useState('')
   const [busy, setBusy] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [search, setSearch] = useState('')
 
   const load = useCallback(() => {
     setLoading(true)
@@ -2624,6 +2625,12 @@ function NotesView({ api, setError }) {
   }
 
   const editing = creating || openId !== null
+  const query = search.trim().toLowerCase()
+  const shownNotes = query
+    ? notes.filter(
+        n => (n.title || '').toLowerCase().includes(query) || (n.preview || '').toLowerCase().includes(query)
+      )
+    : notes
 
   return jsxs('div', {
     style: { display: 'flex', height: '100%', minHeight: 0 },
@@ -2642,12 +2649,18 @@ function NotesView({ api, setError }) {
             style: { padding: '10px 12px', borderBottom: '1px solid var(--ui-stroke-secondary)' },
             children: jsx(Button, { onClick: startCreate, style: { width: '100%' }, children: '+ Notiz' })
           }),
+          notes.length
+            ? jsx('div', {
+                style: { padding: '8px 12px', borderBottom: '1px solid var(--ui-stroke-secondary)' },
+                children: jsx(Input, { value: search, placeholder: 'Suchen…', onChange: event => setSearch(event.target.value) })
+              })
+            : null,
           jsx('div', {
             style: { flex: 1, minHeight: 0, overflowY: 'auto' },
             children: loading
               ? jsx('div', { style: { padding: '12px', color: 'var(--ui-text-tertiary)', fontSize: '0.8rem' }, children: 'Wird geladen…' })
-              : notes.length
-                ? notes.map(n =>
+              : shownNotes.length
+                ? shownNotes.map(n =>
                     jsxs('button', {
                       type: 'button',
                       onClick: () => openNote(n.id),
@@ -2670,7 +2683,10 @@ function NotesView({ api, setError }) {
                       ]
                     }, n.id)
                   )
-                : jsx('div', { style: { padding: '16px', color: 'var(--ui-text-tertiary)', fontSize: '0.8rem' }, children: 'Keine Notizen.' })
+                : jsx('div', {
+                    style: { padding: '16px', color: 'var(--ui-text-tertiary)', fontSize: '0.8rem' },
+                    children: query ? 'Keine Treffer.' : 'Keine Notizen.'
+                  })
           })
         ]
       }),

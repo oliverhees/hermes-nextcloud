@@ -160,7 +160,9 @@ und Dateien brauchen nur CardDAV/WebDAV, die auf jeder Standard-Nextcloud-
 Instanz mitlaufen. Deck- und Forms-Schreibzugriff nutzen Nextclouds
 offizielle, gut dokumentierte APIs (`docs/API.md` in den jeweiligen
 Nextcloud-Repos) mit demselben App-Passwort wie alles andere hier — kein
-zusätzlicher Login.
+zusätzlicher Login. Der Notizen-Tab hat ein Suchfeld über der Liste
+(Titel + Vorschau, rein clientseitig über die bereits geladene Liste,
+keine neue Route).
 
 **Talk und Mail sind als Beta markiert und ungetestet gegen eine echte
 Instanz.** Nextclouds eigene API-Dokumentation bestätigt für Talk das
